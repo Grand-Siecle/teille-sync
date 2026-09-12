@@ -51,7 +51,9 @@ fill in real values. The two settings every install needs first:
 `reclaim_after` (default `6h` — how long a card can sit `En cours`
 before a later run takes the claim back), `project_url`
 (`https://github.com/orgs/<org>/projects/<n>`), `ids_file` (default
-`project-board-ids.json`), `work_dir`, and the three catalogue paths
+`project-board-ids.json`, resolved against the working directory, so
+it belongs beside this README and is gitignored here), `work_dir`, and
+the three catalogue paths
 `metadata_csv`, `persons_csv` and `entities_dir`. Those three are passed
 to `teille-douce` explicitly on every invocation rather than left for
 its own config discovery, which walks up the parent directories from
