@@ -168,9 +168,50 @@ def test_batches_and_until_done_together_is_a_usage_error(capsys):
     assert cli.main(["run", "--batches", "2", "--until-done"]) == exits.USAGE
 
 
-def test_batches_n_runs_exactly_n_batches(monkeypatch, tmp_path):
+# `--batches` never passes through settings.py's converters (it is not a
+# Settings field), so unlike --batch-size it needs its own bounds check —
+# see Finding 1: `--batches 0` used to run one batch silently, and
+# `--batches -5` ran zero, neither with any error.
+
+def test_batches_zero_is_a_usage_error_not_one_batch(monkeypatch, tmp_path):
     _stub_settings(monkeypatch, _settings(tmp_path))
-    monkeypatch.setattr(cli, "preflight", lambda s: _passing_checks())
+    monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
+    monkeypatch.setattr(cli, "run_batch", _boom)
+
+    assert cli.main(["run", "--batches", "0"]) == exits.USAGE
+
+
+def test_batches_negative_is_a_usage_error_not_zero_batches(monkeypatch, tmp_path):
+    _stub_settings(monkeypatch, _settings(tmp_path))
+    monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
+    monkeypatch.setattr(cli, "run_batch", _boom)
+
+    assert cli.main(["run", "--batches", "-5"]) == exits.USAGE
+
+
+def test_batches_non_integer_is_a_usage_error(monkeypatch, tmp_path):
+    _stub_settings(monkeypatch, _settings(tmp_path))
+    monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
+    monkeypatch.setattr(cli, "run_batch", _boom)
+
+    assert cli.main(["run", "--batches", "many"]) == exits.USAGE
+
+
+# --batch-size already goes through settings.py's own _positive_int
+# converter (test_a_bad_flag_value_is_a_usage_error_not_a_fallback above
+# covers zero); this is the same check for a negative value, so the two
+# integer flags are proven symmetric rather than merely assumed to be.
+def test_batch_size_negative_is_also_a_usage_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli, "_config_file", lambda: tmp_path / "absent.toml")
+
+    assert cli.main(["run", "--batch-size", "-3"]) == exits.USAGE
+
+
+def test_batches_n_runs_exactly_n_batches(monkeypatch, tmp_path):
+    # No `cli.preflight` monkeypatch here: since Finding 2, `_cmd_run`'s
+    # real-batch path never calls it directly — only `run_batch()` does,
+    # internally — so a real-run test has nothing to stub it for.
+    _stub_settings(monkeypatch, _settings(tmp_path))
     monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
     monkeypatch.setattr(cli, "now_fn", lambda: NOW)
     calls = []
@@ -185,7 +226,6 @@ def test_batches_n_runs_exactly_n_batches(monkeypatch, tmp_path):
 
 def test_no_count_flag_defaults_to_one_batch(monkeypatch, tmp_path):
     _stub_settings(monkeypatch, _settings(tmp_path))
-    monkeypatch.setattr(cli, "preflight", lambda s: _passing_checks())
     monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
     monkeypatch.setattr(cli, "now_fn", lambda: NOW)
     calls = []
@@ -200,7 +240,6 @@ def test_no_count_flag_defaults_to_one_batch(monkeypatch, tmp_path):
 def test_until_done_stops_when_pending_is_empty(monkeypatch, tmp_path):
     board = FakeBoard(pending_answers=[["LIV0001", "LIV0002"], ["LIV0003"], []])
     _stub_settings(monkeypatch, _settings(tmp_path))
-    monkeypatch.setattr(cli, "preflight", lambda s: _passing_checks())
     monkeypatch.setattr(cli, "_open_board", lambda s: board)
     monkeypatch.setattr(cli, "now_fn", lambda: NOW)
     calls = []
@@ -219,7 +258,6 @@ def test_until_done_stops_when_pending_is_empty(monkeypatch, tmp_path):
 def test_a_misconfigured_batch_stops_the_loop_even_with_batches_remaining(
         monkeypatch, tmp_path):
     _stub_settings(monkeypatch, _settings(tmp_path))
-    monkeypatch.setattr(cli, "preflight", lambda s: _passing_checks())
     monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
     monkeypatch.setattr(cli, "now_fn", lambda: NOW)
     calls = []
@@ -232,6 +270,66 @@ def test_a_misconfigured_batch_stops_the_loop_even_with_batches_remaining(
 
     assert code == exits.MISCONFIGURED
     assert len(calls) == 1   # did not try batches 2-5 against the same refusal
+
+
+# -- run: one preflight per batch, not two (Finding 2) -----------------------
+#
+# run_batch() already runs its own preflight and now hands the result
+# back on BatchResult.checks (see tests/test_batch.py). _cmd_run must
+# display that instead of probing a second time itself — Services alone
+# shells out to the converter's own `check --strict`, which dials two
+# HTTP services and the NER dependencies, so a redundant call here would
+# double that cost on every batch under --until-done.
+
+def test_preflight_is_invoked_exactly_once_per_batch_iteration(monkeypatch, tmp_path):
+    _stub_settings(monkeypatch, _settings(tmp_path))
+    calls = []
+
+    def spy_preflight(settings):
+        calls.append(1)
+        return _passing_checks()
+
+    monkeypatch.setattr(cli, "preflight", spy_preflight)
+    monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
+    monkeypatch.setattr(cli, "now_fn", lambda: NOW)
+
+    def fake_run_batch(settings, board, now, republish, keep):
+        # Mirrors what the real run_batch() does: one preflight() call,
+        # carried back on .checks. If _cmd_run also called cli.preflight
+        # itself (the bug Finding 2 describes), `calls` would come out
+        # longer than the number of batches run.
+        checks = cli.preflight(settings)
+        return BatchResult(exit_code=exits.OK, checks=checks)
+
+    monkeypatch.setattr(cli, "run_batch", fake_run_batch)
+
+    code = cli.main(["run", "--batches", "3"])
+
+    assert code == exits.OK
+    assert len(calls) == 3   # not 4: _cmd_run adds no call of its own
+
+
+def test_a_failed_batchs_checks_are_still_shown_with_their_remedy(
+        monkeypatch, tmp_path, capsys):
+    # The failure path must look identical from the outside even though
+    # _cmd_run no longer probes preflight itself: still MISCONFIGURED,
+    # still the failing check's detail and remedy on screen.
+    _stub_settings(monkeypatch, _settings(tmp_path))
+    monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
+    monkeypatch.setattr(cli, "now_fn", lambda: NOW)
+    failing_checks = [Check("VPN", False, "no route", "bring up the VPN")]
+    monkeypatch.setattr(cli, "run_batch", lambda settings, board, now,
+                        republish, keep: BatchResult(
+                            exit_code=exits.MISCONFIGURED,
+                            message="preflight refused — VPN: no route",
+                            checks=failing_checks))
+
+    code = cli.main(["run"])
+
+    out = capsys.readouterr().out
+    assert code == exits.MISCONFIGURED
+    assert "no route" in out
+    assert "bring up the VPN" in out
 
 
 # -- run: --dry-run -----------------------------------------------------
@@ -275,7 +373,6 @@ def test_dry_run_with_a_failing_preflight_touches_nothing_and_reports_it(
 
 def test_keyboard_interrupt_out_of_run_batch_exits_130(monkeypatch, tmp_path):
     _stub_settings(monkeypatch, _settings(tmp_path))
-    monkeypatch.setattr(cli, "preflight", lambda s: _passing_checks())
     monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
     monkeypatch.setattr(cli, "now_fn", lambda: NOW)
 
@@ -285,6 +382,63 @@ def test_keyboard_interrupt_out_of_run_batch_exits_130(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "run_batch", raise_interrupt)
 
     assert cli.main(["run"]) == exits.INTERRUPTED
+
+
+# -- run: -v / -q (Finding 3) -------------------------------------------
+#
+# -v and -q only ever change how much chatter is on screen — never
+# whether a fact the operator needs (a loss, a failure, a released
+# claim) is visible at all.
+
+def test_verbose_and_quiet_together_is_a_usage_error():
+    assert cli.main(["run", "-v", "-q"]) == exits.USAGE
+
+
+def test_verbose_shows_the_preflight_table_on_a_clean_pass(monkeypatch, tmp_path, capsys):
+    _stub_settings(monkeypatch, _settings(tmp_path))
+    monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
+    monkeypatch.setattr(cli, "now_fn", lambda: NOW)
+    checks = _passing_checks()
+    monkeypatch.setattr(cli, "run_batch", lambda settings, board, now,
+                        republish, keep: BatchResult(exit_code=exits.OK, checks=checks))
+
+    cli.main(["run"])
+    quiet_out = capsys.readouterr().out
+    cli.main(["run", "-v"])
+    verbose_out = capsys.readouterr().out
+
+    # A clean pass says nothing about preflight by default...
+    assert "Preflight" not in quiet_out
+    # ...but -v shows it anyway, precisely because everything passed.
+    assert "Preflight" in verbose_out
+    assert "VPN" in verbose_out
+
+
+def test_quiet_suppresses_the_batch_table_but_never_a_loss(monkeypatch, tmp_path, capsys):
+    _stub_settings(monkeypatch, _settings(tmp_path))
+    monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
+    monkeypatch.setattr(cli, "now_fn", lambda: NOW)
+    # A batch that claimed five and had to release all five — exactly
+    # the scenario CLAUDE.md warns must never look like "nothing to do".
+    result = BatchResult(exit_code=exits.MISCONFIGURED,
+                         claimed=["LIV0001", "LIV0002", "LIV0003", "LIV0004", "LIV0005"],
+                         released=["LIV0001", "LIV0002", "LIV0003", "LIV0004", "LIV0005"],
+                         message="the converter refused before writing anything: "
+                                 "a required service is down")
+    monkeypatch.setattr(cli, "run_batch", lambda settings, board, now,
+                        republish, keep: result)
+
+    code = cli.main(["run", "-q"])
+
+    out = capsys.readouterr().out
+    assert code == exits.MISCONFIGURED
+    # The per-document table (there is nothing to show a row for) is
+    # gone under -q...
+    assert "Identifier" not in out   # batch_table's own column header
+    # ...but the fact that five were claimed and released, and why, is
+    # not chatter — it must survive -q.
+    assert "released 5" in out
+    assert "a required service is down" in out
 
 
 # -- status --------------------------------------------------------------

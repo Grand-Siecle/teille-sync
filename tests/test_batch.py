@@ -252,6 +252,26 @@ def test_nothing_is_claimed_when_preflight_refused(tmp_path, monkeypatch):
     assert board.claim_calls == []
     assert result.outcomes == {}
     assert result.claimed == []
+    # A caller running several batches in a row (Task 8's cli.py) reads
+    # this instead of probing a second time itself — the failing check,
+    # with its remedy, must travel with the result.
+    assert result.checks == checks
+
+
+def test_a_passing_batch_also_carries_its_own_preflight_checks(tmp_path, monkeypatch):
+    # Not just the failure path: a caller displaying preflight under
+    # --verbose on a clean pass needs the same field populated then too.
+    root = _share(tmp_path, _five())
+    calls = []
+    _patch_common(monkeypatch, ALL_OK, calls=calls)
+    checks = _passing_checks()
+    monkeypatch.setattr(batch, "preflight", lambda settings: checks)
+    board = FakeBoard(_cards(_five()))
+
+    result = batch.run_batch(_settings(tmp_path, root), board, NOW)
+
+    assert result.checks == checks
+    assert all(c.ok for c in result.checks)
 
 
 def test_a_service_down_at_preflight_claims_nothing_at_all(tmp_path, monkeypatch):

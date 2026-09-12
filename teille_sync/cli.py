@@ -266,18 +266,21 @@ def _cmd_ids_refresh(settings, console):
 
 def _cmd_run(settings, console, *, batches, until_done, republish, keep,
             dry_run, quiet, verbose):
-    checks = preflight(settings)
-    if verbose or any(not c.ok for c in checks):
-        console.print(report.preflight_table(checks))
-    if any(not c.ok for c in checks):
-        return exits.MISCONFIGURED
-
-    try:
-        board = _open_board(settings)
-    except BoardTransportError as why:
-        exits.refuse(str(why), code=exits.MISCONFIGURED)
-
     if dry_run:
+        # Dry run never calls run_batch(), so it is the one path with no
+        # BatchResult to read `.checks` off of — it has to probe
+        # preflight itself.
+        checks = preflight(settings)
+        if verbose or any(not c.ok for c in checks):
+            console.print(report.preflight_table(checks))
+        if any(not c.ok for c in checks):
+            return exits.MISCONFIGURED
+
+        try:
+            board = _open_board(settings)
+        except BoardTransportError as why:
+            exits.refuse(str(why), code=exits.MISCONFIGURED)
+
         # A preview from board.pending(), never from claim(): claiming
         # is the lock, and a dry run must never take it. This can list a
         # document another machine claims before the real run starts —
@@ -285,6 +288,11 @@ def _cmd_run(settings, console, *, batches, until_done, republish, keep,
         candidates = [c.identifier for c in board.pending()[:settings.batch_size]]
         console.print(report.dry_run_table(candidates))
         return exits.OK
+
+    try:
+        board = _open_board(settings)
+    except BoardTransportError as why:
+        exits.refuse(str(why), code=exits.MISCONFIGURED)
 
     overall = exits.OK
     ran = 0
@@ -295,9 +303,19 @@ def _cmd_run(settings, console, *, batches, until_done, republish, keep,
         elif ran >= (batches or 1):
             break
 
+        # run_batch() runs its own preflight, once, and hands the result
+        # back on `.checks` — this must not call `preflight()` again:
+        # its Services check alone shells out to the converter's own
+        # `check --strict`, which probes two HTTP services and the NER
+        # dependencies, so a second call here would double that cost on
+        # every single batch under --until-done. Per-batch re-probing
+        # across *iterations* stays correct (a service can die between
+        # batches); a second probe of the *same* batch is pure waste.
         result = run_batch(settings, board, now_fn(),
                            republish=republish, keep=keep)
         ran += 1
+        if verbose or any(not c.ok for c in result.checks):
+            console.print(report.preflight_table(result.checks))
         overall = max(overall, result.exit_code)
         if not quiet:
             console.print(report.batch_table(result))
@@ -312,6 +330,24 @@ def _cmd_run(settings, console, *, batches, until_done, republish, keep,
 
 # -- argument parsing and dispatch -------------------------------------------
 
+def _positive_batches(raw):
+    """The `type=` for `--batches`. Unlike `--batch-size`, `--batches`
+    never passes through `settings.py`'s converters — it is not a
+    `Settings` field, only the CLI's own loop count — so this is the one
+    place guarding it. `int()` alone would accept `0` (running one batch
+    silently, the opposite of what was asked) and negative values
+    (running none, with no error): the same "a bad flag is a usage error,
+    never a silent fallback" rule `settings.py` applies to every other
+    integer flag."""
+    try:
+        value = int(raw)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {raw!r}")
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be 1 or more, not {value}")
+    return value
+
+
 def _build_parser():
     parser = argparse.ArgumentParser(
         prog="teille-sync",
@@ -321,8 +357,8 @@ def _build_parser():
 
     run_p = sub.add_parser("run", help="convert one or more batches")
     count = run_p.add_mutually_exclusive_group()
-    count.add_argument("--batches", type=int, default=None, metavar="N",
-                       help="run exactly N batches (default: 1)")
+    count.add_argument("--batches", type=_positive_batches, default=None,
+                       metavar="N", help="run exactly N batches (default: 1)")
     count.add_argument("--until-done", action="store_true",
                        help="keep running batches until nothing is à traiter")
     run_p.add_argument("--batch-size", type=int, default=None, metavar="N",

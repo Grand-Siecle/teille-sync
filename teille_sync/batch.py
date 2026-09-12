@@ -80,6 +80,14 @@ class BatchResult:
     interrupt) is never mistaken, downstream, for a batch that found
     nothing to do: an empty `outcomes` dict means two very different
     things depending on whether `claimed` is also empty.
+
+    `checks` carries this call's own `preflight()` result (passing or
+    failing) so a caller running several batches in a row — Task 8's
+    `cli.py`, under `--batches`/`--until-done` — can display what this
+    batch found without probing a second time itself. Per-batch
+    re-probing here, inside `run_batch`, stays correct and necessary (a
+    service can die between batches); it is a second call for the *same*
+    batch, from the caller on top of this one, that is the waste.
     """
     outcomes: dict = field(default_factory=dict)
     published: dict = field(default_factory=dict)
@@ -88,6 +96,7 @@ class BatchResult:
     reclaimed: list = field(default_factory=list)
     released: list = field(default_factory=list)
     message: str = ""
+    checks: list = field(default_factory=list)
 
 
 def _machine_name():
@@ -168,7 +177,8 @@ def run_batch(settings, board, now, republish=False, keep=False):
     if failing:
         detail = "; ".join(f"{c.name}: {c.detail}" for c in failing)
         return BatchResult(exit_code=exits.MISCONFIGURED,
-                           message=f"preflight refused — {detail}")
+                           message=f"preflight refused — {detail}",
+                           checks=checks)
 
     machine = _machine_name()
     input_dir = Path(settings.work_dir) / "OCR"
@@ -199,7 +209,7 @@ def run_batch(settings, board, now, republish=False, keep=False):
                 claimed.append(card)
 
         result = BatchResult(claimed=[c.identifier for c in claimed],
-                             reclaimed=reclaimed)
+                             reclaimed=reclaimed, checks=checks)
         if not claimed:
             return result
 
