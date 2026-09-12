@@ -745,7 +745,21 @@ def run_converter(docs, input_dir, output_dir, plain=False):
 
 
 def validate(output_dir, docs):
-    """`teille-douce validate --json`, reduced to one verdict per document."""
+    """`teille-douce validate --json`, reduced to one verdict per document.
+
+    The shape, confirmed against the running CLI rather than guessed:
+
+        {"applied": ["python invariants", "teille-douce.rng", "…svrl.xsl"],
+         "files":   [{"path": "tei_out/LIV0044_reconciled.tei.xml",
+                      "errors": ["teille-douce.rng L27663: Did not expect …",
+                                 "Schematron: Element \"blockquote\" is not …"],
+                      "warnings": []}],
+         "errors":  2}
+
+    There is **no `valid` key**: a document is valid when its `errors` list
+    is empty. Errors are plain strings. The command exits 1 when anything
+    failed and 0 when everything passed.
+    """
     proc = subprocess.run(
         ["teille-douce", "validate", str(output_dir), "--json"],
         capture_output=True, text=True, check=False)
@@ -756,13 +770,12 @@ def validate(output_dir, docs):
         # rather than claim every document is valid.
         return {}
     verdicts = {}
-    for entry in report.get("documents", report.get("files", [])):
-        name = Path(entry.get("path", entry.get("file", ""))).name
-        stem = name[:-len(".tei.xml")] if name.endswith(".tei.xml") else name
-        verdicts[stem] = {
-            "valid": bool(entry.get("valid", entry.get("ok", False))),
-            "errors": [str(e) for e in (entry.get("errors") or [])],
-        }
+    for entry in report.get("files") or []:
+        stem = Path(entry.get("path") or "").name.removesuffix(".tei.xml")
+        if not stem:
+            continue
+        errors = [str(e) for e in (entry.get("errors") or [])]
+        verdicts[stem] = {"valid": not errors, "errors": errors}
     return verdicts
 ```
 
@@ -771,17 +784,41 @@ def validate(output_dir, docs):
 Run: `pytest tests/test_convert.py -v`
 Expected: 5 passed
 
-- [ ] **Step 5: Verify the real shape of `validate --json`**
+- [ ] **Step 5: Pin the validator's contract with a fixture test**
 
-The parser above guesses at two possible key names. Confirm against the
-real thing before trusting it:
+The shape above was captured from the running CLI, both for a clean file
+and for one with an injected invalid element. Write two tests over that
+exact JSON, as literals — not by invoking the validator:
 
-```bash
-cd <TEIlle-douce checkout> && venv/bin/teille-douce validate tei_test --json | head -40
+```python
+CLEAN = {"applied": ["python invariants"], "errors": 0,
+         "files": [{"path": "tei/LIV0044_reconciled.tei.xml",
+                    "errors": [], "warnings": []}]}
+BROKEN = {"applied": ["python invariants"], "errors": 2,
+          "files": [{"path": "tei/LIV9999_reconciled.tei.xml",
+                     "errors": ["teille-douce.rng L27663: Did not expect "
+                                "element blockquote there",
+                                "Schematron: Element \"blockquote\" is not "
+                                "part of the TEIlle-douce inventory."],
+                     "warnings": []}]}
+
+
+def test_an_empty_error_list_is_what_valid_means(monkeypatch):
+    _stub_validate(monkeypatch, CLEAN)
+    assert validate("tei", [])["LIV0044_reconciled"]["valid"] is True
+
+
+def test_errors_make_it_invalid_and_are_kept_as_written(monkeypatch):
+    _stub_validate(monkeypatch, BROKEN)
+    got = validate("tei", [])["LIV9999_reconciled"]
+    assert got["valid"] is False
+    assert "blockquote" in got["errors"][0]
 ```
 
-Adjust `validate()` to the keys actually emitted, and add a fixture test
-using that exact JSON. Do not leave both spellings in.
+`_stub_validate` patches `subprocess.run` to return the JSON as stdout.
+The point is the absent `valid` key: an implementation that reads
+`entry.get("valid", False)` marks every document invalid, and the whole
+corpus lands in "À vérifier" looking deliberate.
 
 - [ ] **Step 6: Commit**
 

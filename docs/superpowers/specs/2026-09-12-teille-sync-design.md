@@ -53,8 +53,14 @@ card moved, no file copied.
    in the UI has a new id, and a sync writing to a dead id fails silently.
 5. **Converter present** — `teille-douce --version`, recorded for the
    *Version pipeline* field.
-5b. **Services up** — `teille-douce check -i <work>/OCR --strict`, whose
-   output is shown verbatim when it refuses. The converter's own preflight
+5b. **Services up** — `teille-douce check -i <work>/OCR`, whose services
+   block is read (and whose output is shown verbatim when it refuses).
+   *Amended after the end-to-end review:* `--strict` was in this line,
+   and the check gated on the exit code. Preflight runs before anything
+   is fetched, so that directory is always empty, and an empty input
+   exits non-zero — `unusable — nothing to convert` — with every service
+   up. The gate reads the three service rows instead, and treats a block
+   it cannot find as a refusal. The converter's own preflight
    probes VieuxParler, PyHellen *and* the NER dependencies, and its code
    says why teille-sync must not re-probe: a preflight that disagrees with
    the run is worse than none. All three phases are mandatory for this

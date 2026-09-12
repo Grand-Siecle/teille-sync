@@ -6,4 +6,5 @@ config.local.toml
 project-board-ids.json
 work/
 .coverage*
-.superpowers/
+build/
+dist/

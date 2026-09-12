@@ -1,0 +1,247 @@
+import pytest
+from teille_sync.verdict import decide, CAUSE_BY_CODE, PHASE_BY_STEP
+
+
+def v(doc="LIV0001_reconciled", manifest=None, incidents=(), validation=None,
+      fetched=True):
+    return decide(doc, manifest or {"documents": {}}, list(incidents),
+                  validation, fetched)
+
+
+def test_never_fetched_is_blocked_not_failed():
+    r = v(fetched=False)
+    assert r.status == "Bloqué"
+    assert r.cause == "Absent du NAS"
+
+
+def test_absent_from_the_manifest_is_blocked():
+    # The run happened but never saw this document: expansion dropped it.
+    r = v(manifest={"documents": {"LIV0002_reconciled": "ok"}})
+    assert r.status == "Bloqué"
+
+
+def test_failed_takes_its_cause_and_phase_from_the_incident():
+    r = v(manifest={"documents": {"LIV0001_reconciled": "failed"}},
+          incidents=[{"code": "document_failed", "document": "LIV0001_reconciled",
+                      "step": "sourcedoc", "count": 1, "total": 1,
+                      "detail": "lxml: premature end of data"}])
+    assert r.status == "Échec"
+    assert r.cause == "Document en échec"
+    assert r.phase == "sourceDoc"
+    assert "premature end" in r.detail
+
+
+def test_a_failed_document_is_named_by_what_killed_it_not_by_what_came_first():
+    """Incidents append in occurrence order. A volume that lost pages and
+    then died took its Cause from the page loss — "Pages perdues" for a
+    document that is not on the share at all — because `ours[0]` was
+    whatever happened first."""
+    r = v(manifest={"documents": {"LIV0001_reconciled": "failed"}},
+          incidents=[
+              {"code": "page_unusable", "document": "LIV0001_reconciled",
+               "step": "sourcedoc", "count": 3, "detail": "3 pages unreadable"},
+              {"code": "retry_unanswered", "document": "LIV0001_reconciled",
+               "step": "enrich", "count": 1, "detail": "PyHellen timed out"},
+              {"code": "document_failed", "document": "LIV0001_reconciled",
+               "step": "ner", "count": 1, "detail": "gliner: out of memory"},
+          ])
+    assert r.status == "Échec"
+    assert r.cause == "Document en échec"
+    assert r.phase == "NER"
+    assert "out of memory" in r.detail
+    # Every incident still counts towards Pertes.
+    assert r.losses == 5
+
+
+def test_a_terminal_code_wins_from_anywhere_in_the_list():
+    """`volume_unreadable` last, after two non-terminal incidents."""
+    r = v(manifest={"documents": {"LIV0001_reconciled": "failed"}},
+          incidents=[
+              {"code": "container_failed", "document": "LIV0001_reconciled",
+               "step": "sourcedoc", "count": 1, "detail": "one container"},
+              {"code": "breaker_skipped", "document": "LIV0001_reconciled",
+               "step": "modernize", "count": 1, "detail": "breaker open"},
+              {"code": "volume_unreadable", "document": "LIV0001_reconciled",
+               "step": "expand", "count": 1, "detail": "zip truncated"},
+          ])
+    assert r.cause == "Volume illisible"
+    assert r.phase == "Décompression"
+
+
+def test_a_failure_with_no_terminal_code_still_takes_the_first_incident():
+    """The fallback, unchanged: nothing terminal was recorded, so the
+    first incident is the best thing there is to name it with."""
+    r = v(manifest={"documents": {"LIV0001_reconciled": "failed"}},
+          incidents=[
+              {"code": "container_failed", "document": "LIV0001_reconciled",
+               "step": "sourcedoc", "count": 2, "detail": "two containers"},
+              {"code": "breaker_skipped", "document": "LIV0001_reconciled",
+               "step": "ner", "count": 1, "detail": "breaker open"},
+          ])
+    assert r.cause == "Conteneur en échec"
+    assert r.phase == "sourceDoc"
+
+
+def test_a_terminal_code_from_another_document_does_not_name_this_failure():
+    r = v(manifest={"documents": {"LIV0001_reconciled": "failed"}},
+          incidents=[
+              {"code": "page_unusable", "document": "LIV0001_reconciled",
+               "step": "sourcedoc", "count": 1, "detail": "mine"},
+              {"code": "document_failed", "document": "LIV0002_reconciled",
+               "step": "ner", "count": 1, "detail": "someone else's"},
+          ])
+    assert r.cause == "Pages perdues"
+    assert "mine" in r.detail
+
+
+def test_ok_and_clean_and_valid_is_finished():
+    r = v(manifest={"documents": {"LIV0001_reconciled": "ok"}},
+          validation={"valid": True})
+    assert r.status == "Terminé"
+    assert r.losses == 0
+    assert r.cause is None
+
+
+def test_ok_but_invalid_needs_a_look_and_names_the_schema():
+    r = v(manifest={"documents": {"LIV0001_reconciled": "ok"}},
+          validation={"valid": False, "errors": ["ab is not allowed here"]})
+    assert r.status == "À vérifier"
+    assert r.cause == "Validation schéma"
+    assert "ab is not allowed" in r.detail
+
+
+def test_a_validation_that_could_not_be_read_is_not_a_finished_document():
+    """`validate()` used to answer `{}` when it could not parse the
+    validator's report, and `decide()` reads a missing entry as "no
+    opinion" — so a document nobody validated came out `Terminé`,
+    published, with an empty Détail. An unread validation is a reason to
+    look, not a clean bill of health."""
+    r = v(manifest={"documents": {"LIV0001_reconciled": "ok"}},
+          validation={"valid": False, "read": False,
+                      "errors": ["teille-douce: no schema could be applied"]})
+    assert r.status == "À vérifier"
+    assert r.cause != "Validation schéma"   # nothing said the schema failed
+    assert "no schema could be applied" in r.detail
+    assert "could not be read" in r.detail
+
+
+def test_a_validation_that_was_read_and_failed_still_names_the_schema():
+    """The counter-test: the ordinary invalid document keeps its own
+    cause, and the new branch must not swallow it."""
+    r = v(manifest={"documents": {"LIV0001_reconciled": "ok"}},
+          validation={"valid": False, "read": True, "errors": ["ab not allowed"]})
+    assert r.status == "À vérifier"
+    assert r.cause == "Validation schéma"
+
+
+def test_a_lost_phase_is_a_failure_even_though_the_document_converted():
+    # A service that died between the probe and this document: the file
+    # was written, recorded "ok", and has none of that phase's output.
+    # This corpus wants all three phases, so that is an error.
+    r = v(manifest={"documents": {"LIV0001_reconciled": "ok"}},
+          validation={"valid": True},
+          incidents=[{"code": "phase_lost", "document": "LIV0001_reconciled",
+                      "step": "modernize", "count": 120, "total": 120,
+                      "detail": "VieuxParler stopped answering"}])
+    assert r.status == "Échec"
+    assert r.cause == "Phase perdue"
+    assert r.phase == "Modernisation"
+    assert r.losses == 120
+
+
+def test_a_lost_phase_outranks_a_schema_failure_in_the_detail():
+    r = v(manifest={"documents": {"LIV0001_reconciled": "ok"}},
+          validation={"valid": False, "errors": ["ab is not allowed here"]},
+          incidents=[{"code": "phase_lost", "document": "LIV0001_reconciled",
+                      "step": "enrich", "count": 9, "total": 9,
+                      "detail": "PyHellen stopped answering"}])
+    assert r.status == "Échec"
+    assert r.phase == "Enrichissement"
+    assert "PyHellen" in r.detail
+
+
+def test_ok_with_incidents_counts_every_one_of_them():
+    r = v(manifest={"documents": {"LIV0001_reconciled": "ok"}},
+          validation={"valid": True},
+          incidents=[{"code": "page_unusable", "document": "LIV0001_reconciled",
+                      "step": "sourcedoc", "count": 3, "total": 40, "detail": ""},
+                     {"code": "container_failed", "document": "LIV0001_reconciled",
+                      "step": "sourcedoc", "count": 2, "total": 99, "detail": ""}])
+    assert r.status == "À vérifier"
+    assert r.cause == "Pages perdues"
+    assert r.phase == "sourceDoc"
+    assert r.losses == 5
+
+
+def test_incidents_of_another_document_are_not_counted_here():
+    r = v(manifest={"documents": {"LIV0001_reconciled": "ok"}},
+          validation={"valid": True},
+          incidents=[{"code": "page_unusable", "document": "LIV0999_reconciled",
+                      "step": "sourcedoc", "count": 7, "total": 40, "detail": ""}])
+    assert r.status == "Terminé"
+    assert r.losses == 0
+
+
+def test_an_unknown_code_falls_back_rather_than_crashing():
+    r = v(manifest={"documents": {"LIV0001_reconciled": "failed"}},
+          incidents=[{"code": "something_new", "document": "LIV0001_reconciled",
+                      "step": "run", "count": 1, "total": 1, "detail": "?"}])
+    assert r.cause == "Autre"
+
+
+def test_a_step_the_board_has_no_option_for_leaves_phase_empty():
+    # The pipeline emits `run` for document-level failures; the board has
+    # no such phase, and guessing one would be a lie.
+    r = v(manifest={"documents": {"LIV0001_reconciled": "failed"}},
+          incidents=[{"code": "document_failed", "document": "LIV0001_reconciled",
+                      "step": "run", "count": 1, "total": 1, "detail": "boom"}])
+    assert r.phase is None
+
+
+def test_cause_by_code_has_all_required_mappings():
+    expected = {
+        "archive_corrupt": "ZIP illisible",
+        "volume_unreadable": "Volume illisible",
+        "page_unusable": "Pages perdues",
+        "container_failed": "Conteneur en échec",
+        "phase_lost": "Phase perdue",
+        "batch_failed": "Lot refusé",
+        "retry_unanswered": "Relance sans réponse",
+        "breaker_skipped": "Disjoncteur",
+        "document_failed": "Document en échec",
+    }
+    assert CAUSE_BY_CODE == expected
+
+
+def test_phase_by_step_has_all_required_mappings():
+    expected = {
+        "expand": "Décompression",
+        "sourcedoc": "sourceDoc",
+        "enrich": "Enrichissement",
+        "modernize": "Modernisation",
+        "ner": "NER",
+    }
+    assert PHASE_BY_STEP == expected
+
+
+def test_expand_phase_is_correctly_translated():
+    r = v(manifest={"documents": {"LIV0001_reconciled": "failed"}},
+          incidents=[{"code": "archive_corrupt", "document": "LIV0001_reconciled",
+                      "step": "expand", "count": 1, "total": 1, "detail": "bad zip"}])
+    assert r.phase == "Décompression"
+
+
+def test_enrich_phase_is_correctly_translated():
+    r = v(manifest={"documents": {"LIV0001_reconciled": "ok"}},
+          validation={"valid": True},
+          incidents=[{"code": "phase_lost", "document": "LIV0001_reconciled",
+                      "step": "enrich", "count": 1, "total": 1, "detail": "service down"}])
+    assert r.phase == "Enrichissement"
+
+
+def test_ner_phase_is_correctly_translated():
+    r = v(manifest={"documents": {"LIV0001_reconciled": "ok"}},
+          validation={"valid": True},
+          incidents=[{"code": "phase_lost", "document": "LIV0001_reconciled",
+                      "step": "ner", "count": 1, "total": 1, "detail": "model down"}])
+    assert r.phase == "NER"
