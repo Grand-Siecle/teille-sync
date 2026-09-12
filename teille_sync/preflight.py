@@ -231,11 +231,17 @@ def _check_converter(which):
 # -- 6. Services --------------------------------------------------------
 
 def _check_services(settings):
-    """`check_services()` wraps `teille-douce check --strict`, which
-    probes PyHellen, VieuxParler and the NER dependencies. All three
-    phases are mandatory for this corpus, so a refusal here stops the
-    batch before a single card is claimed — this is a gate, not a
-    warning."""
+    """`check_services()` runs `teille-douce check` and reads the
+    services block it prints — VieuxParler, PyHellen and the NER
+    dependencies. All three phases are mandatory for this corpus, so a
+    refusal here stops the batch before a single card is claimed: this
+    is a gate, not a warning, and fetching 150 MB over a VPN only to
+    find PyHellen down is exactly what it exists to avoid.
+
+    The input directory it points the converter at is empty at this
+    point — nothing has been fetched yet — which is why the exit code is
+    not what decides. See `convert.check_services`.
+    """
     input_dir = Path(settings.work_dir) / "OCR"
     try:
         ok, output = check_services(input_dir)
@@ -253,10 +259,11 @@ def _check_services(settings):
 
     # The converter's own words, verbatim — not a paraphrase.
     detail = output if output else "the converter's own preflight refused"
-    remedy = ("PyHellen (enrichment) and VieuxParler (modernization) are "
-             "both mandatory for this corpus; the run would pass "
-             "`--phases all --require-services` anyway, so there is no "
-             "point claiming cards until the converter's own check passes")
+    remedy = ("read the services block above: a service that is not `up` "
+             "has to be brought up — the run passes `--phases all "
+             "--require-services` and would refuse anyway — and a block "
+             "the report never printed means `teille-douce check -i "
+             f"{input_dir}` has to be run by hand to see what it says")
     return Check("Services", False, detail, remedy)
 
 

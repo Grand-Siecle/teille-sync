@@ -50,18 +50,89 @@ def read_incidents(run_dir):
     return out
 
 
+# The three services `teille-douce check` reports on, as (name, endpoint)
+# — the two halves of the middle column of its own services block:
+#
+#     services   VieuxParler modernization                            up
+#                PyHellen    enrichment                          refused
+#                NER models  entity recognition                       up
+#
+# Names and endpoints are `teille_douce.preflight.Service`'s own; the
+# state is whatever the converter wrote flush right on that row.
+SERVICES = (
+    ("VieuxParler", "modernization"),
+    ("PyHellen", "enrichment"),
+    ("NER models", "entity recognition"),
+)
+
+
+def service_states(output):
+    """`{"PyHellen": "refused", …}` for every service row found.
+
+    A service the report never mentions is simply absent from the
+    result — the caller decides what a missing row means, and for
+    `check_services` below it means refusal.
+    """
+    states = {}
+    for line in output.splitlines():
+        for name, endpoint in SERVICES:
+            if name in states:
+                continue
+            at_name = line.find(name)
+            if at_name < 0:
+                continue
+            at_endpoint = line.find(endpoint, at_name + len(name))
+            if at_endpoint < 0:
+                continue
+            state = line[at_endpoint + len(endpoint):].strip()
+            if state:
+                states[name] = state
+    return states
+
+
+def _is_up(state):
+    """`up`, with or without the parenthesised detail the report may
+    append. Every other state — `refused`, `not probed`, `not asked
+    for`, `missing (torch)` — is not up."""
+    return state.split("(")[0].strip() == "up"
+
+
 def check_services(input_dir):
-    """The converter's own preflight, strict. Returns (ok, output).
+    """The converter's own preflight, read rather than exited on.
+    Returns (ok, output), `ok` only when all three services say `up`.
 
     Not a re-probe: teille_douce/preflight.py runs the same checks the run
     does, on purpose, "because a preflight that disagreed with the run"
     would be worse than none. It covers VieuxParler, PyHellen *and* the
     NER dependencies, which have no service to dial.
+
+    **`--strict` is deliberately not passed, and the exit code is
+    deliberately ignored.** This runs before anything is fetched, so the
+    input directory is empty on every fresh machine, and an empty input
+    is `unusable — nothing to convert`: exit 3 with all three services
+    up. Gating on that exit code refused every clean run and sent the
+    operator to restart two services that were already answering. What
+    this gate is for is the services, so the services block is what it
+    reads.
+
+    A report whose three service rows cannot all be found is a refusal,
+    not a pass: a gate that passes because it failed to parse would send
+    150 MB over the VPN to a converter nobody checked. The child's whole
+    output travels back either way, so preflight still shows the
+    converter's own words.
     """
     proc = subprocess.run(
-        ["teille-douce", "check", "-i", str(input_dir), "--strict"],
+        ["teille-douce", "check", "-i", str(input_dir)],
         capture_output=True, text=True, check=False)
-    return proc.returncode == 0, (proc.stdout or "") + (proc.stderr or "")
+    output = (proc.stdout or "") + (proc.stderr or "")
+
+    states = service_states(output)
+    unread = [name for name, _ in SERVICES if name not in states]
+    if unread:
+        note = ("the converter's own services report could not be read — "
+                f"no row for {', '.join(unread)}")
+        return False, f"{output.rstrip()}\n{note}" if output.strip() else note
+    return all(_is_up(states[name]) for name, _ in SERVICES), output
 
 
 def run_converter(docs, input_dir, output_dir, metadata_csv, persons_csv,

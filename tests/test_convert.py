@@ -1,5 +1,8 @@
 import json
+
 import pytest
+
+import teille_sync.convert
 from pathlib import Path
 from unittest.mock import MagicMock, call
 from teille_sync.convert import (latest_run, read_manifest, read_incidents,
@@ -72,39 +75,142 @@ def test_missing_run_directory_incidents_returns_empty_list(tmp_path):
     assert read_incidents(tmp_path / "no-such-run") == []
 
 
-def test_check_services_returns_ok_when_exitcode_is_zero(monkeypatch):
-    """When teille-douce check succeeds, return (True, output)."""
-    def mock_run(*args, **kwargs):
+# -- check_services: the services block, read rather than the exit code ----
+#
+# `teille-douce check --strict` exits 3 on an empty input directory ("nothing
+# to convert"), and preflight runs *before* anything is fetched, so that
+# directory is always empty on a fresh machine. Reading the exit code made
+# the Services gate refuse on every clean run and blame two services that
+# were up. The gate now reads the converter's own services block instead.
+
+SERVICES_BLOCK = """\
+  input      work/OCR                                 0 volumes · 0 pages
+  output     work/tei_output                                     writable
+  catalogue  metadata_livre.csv                    396 rows · 0 matched
+             metadata_personne.csv                        1 234 persons
+  services   VieuxParler modernization                                {vp}
+             PyHellen    enrichment                                   {ph}
+             NER models  entity recognition                           {ner}
+"""
+
+
+def _report(vp="up", ph="up", ner="up", tail=""):
+    return SERVICES_BLOCK.format(vp=vp, ph=ph, ner=ner) + tail
+
+
+def _answers(output, returncode=0, stderr=""):
+    """A `subprocess.run` double that answers with one recorded report."""
+    seen = {}
+
+    def mock_run(argv, **kwargs):
+        seen["argv"] = list(argv)
         result = MagicMock()
-        result.returncode = 0
-        result.stdout = "All services available\n"
-        result.stderr = ""
+        result.returncode = returncode
+        result.stdout = output
+        result.stderr = stderr
         return result
 
-    import teille_sync.convert
+    return mock_run, seen
+
+
+def test_check_services_passes_when_all_three_rows_say_up(monkeypatch):
+    mock_run, _ = _answers(_report())
     monkeypatch.setattr(teille_sync.convert.subprocess, "run", mock_run)
 
     ok, output = check_services("some_input")
+
     assert ok is True
-    assert "All services available" in output
+    # The child's own words travel with the answer — preflight shows them.
+    assert "VieuxParler" in output and "PyHellen" in output
 
 
-def test_check_services_returns_fail_when_exitcode_nonzero(monkeypatch):
-    """When teille-douce check fails, return (False, combined_output)."""
-    def mock_run(*args, **kwargs):
-        result = MagicMock()
-        result.returncode = 1
-        result.stdout = "stdout message"
-        result.stderr = "stderr message"
-        return result
-
-    import teille_sync.convert
+@pytest.mark.parametrize("down", [
+    {"vp": "refused"}, {"ph": "refused"}, {"ner": "missing (torch)"},
+    {"vp": "not probed"}, {"ph": "not probed"},
+    {"ner": "not asked for"}, {"vp": "not asked for"},
+], ids=["vieuxparler_refused", "pyhellen_refused", "ner_missing",
+        "vieuxparler_not_probed", "pyhellen_not_probed",
+        "ner_not_asked_for", "vieuxparler_not_asked_for"])
+def test_one_service_that_is_not_up_refuses_the_whole_gate(monkeypatch, down):
+    mock_run, _ = _answers(_report(**down))
     monkeypatch.setattr(teille_sync.convert.subprocess, "run", mock_run)
 
     ok, output = check_services("some_input")
+
     assert ok is False
-    assert "stdout message" in output
-    assert "stderr message" in output
+    assert "services" in output
+
+
+def test_a_report_with_no_services_block_is_a_refusal_not_a_pass(monkeypatch):
+    """A gate that passes because it failed to parse is the worst
+    outcome here: it would send five archives over the VPN to a
+    converter whose services nobody checked."""
+    mock_run, _ = _answers("teille-douce: -i: no such directory\n", returncode=3)
+    monkeypatch.setattr(teille_sync.convert.subprocess, "run", mock_run)
+
+    ok, output = check_services("some_input")
+
+    assert ok is False
+    # It says *why* it refused, and names what it could not find.
+    assert "could not be read" in output
+    assert "VieuxParler" in output and "PyHellen" in output
+    assert "NER models" in output
+    # The child's own words are kept alongside the explanation.
+    assert "no such directory" in output
+
+
+def test_a_partial_services_block_is_a_refusal(monkeypatch):
+    """Two rows out of three: the third might be down, might be absent.
+    Refuse rather than guess."""
+    partial = ("  services   VieuxParler modernization      up\n"
+               "             PyHellen    enrichment         up\n")
+    mock_run, _ = _answers(partial)
+    monkeypatch.setattr(teille_sync.convert.subprocess, "run", mock_run)
+
+    ok, output = check_services("some_input")
+
+    assert ok is False
+    assert "NER models" in output
+
+
+def test_an_empty_input_directory_is_not_a_service_failure(monkeypatch):
+    """**The regression guard for the gate that refused on every fresh
+    machine.** Preflight runs before anything is fetched, so the input
+    directory is empty and the converter's verdict line reads "unusable
+    — nothing to convert" with a non-zero exit code. All three services
+    are up; the gate exists to check the services, and it must pass."""
+    mock_run, _ = _answers(
+        _report(tail="\n  unusable — nothing to convert\n"), returncode=3)
+    monkeypatch.setattr(teille_sync.convert.subprocess, "run", mock_run)
+
+    ok, output = check_services("some_input")
+
+    assert ok is True
+    assert "nothing to convert" in output
+
+
+def test_check_services_never_passes_strict_to_the_converter(monkeypatch):
+    """`--strict` is what turned "nothing to convert" into a refusal.
+    The flag is gone; the command is the plain `check -i <dir>`."""
+    mock_run, seen = _answers(_report())
+    monkeypatch.setattr(teille_sync.convert.subprocess, "run", mock_run)
+
+    check_services("some_input")
+
+    assert "--strict" not in seen["argv"]
+    assert seen["argv"][:2] == ["teille-douce", "check"]
+    assert seen["argv"][seen["argv"].index("-i") + 1] == "some_input"
+
+
+def test_a_service_row_state_is_read_even_when_stderr_carried_it(monkeypatch):
+    """The converter writes its report to stdout, but a run that fell
+    over can leave part of it on stderr. Both halves are searched."""
+    mock_run, _ = _answers("", returncode=3, stderr=_report())
+    monkeypatch.setattr(teille_sync.convert.subprocess, "run", mock_run)
+
+    ok, _ = check_services("some_input")
+
+    assert ok is True
 
 
 def test_run_converter_passes_metadata_and_persons_flags(monkeypatch):

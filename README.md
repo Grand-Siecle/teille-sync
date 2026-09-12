@@ -152,6 +152,15 @@ document that claims more annotation than it actually got. In practice
 that means PyHellen and VieuxParler both have to be running and
 reachable, and `teille-douce`'s NER dependencies have to be installed,
 before this tool will claim a single card. `teille-sync check` runs the
-converter's own `check --strict`, which probes all three, and reports
-exactly what it finds — a failing Services check there is a reason not
-to run, not a warning to note and proceed past anyway.
+converter's own `teille-douce check` and reads the services block it
+prints, reporting exactly what it finds — a failing Services check there
+is a reason not to run, not a warning to note and proceed past anyway.
+
+It reads that block rather than the converter's exit code on purpose.
+Preflight runs before anything is fetched, so the input directory it
+points the converter at is empty, and an empty input is `unusable —
+nothing to convert`: a non-zero exit with all three services up. A gate
+on that exit code refused every run on a clean machine and sent the
+operator to restart services that were already answering. A report whose
+three service rows cannot all be found is still a refusal — a gate that
+passes because it failed to parse is worse than no gate.
