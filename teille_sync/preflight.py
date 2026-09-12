@@ -34,12 +34,6 @@ from teille_sync.convert import check_services
 
 CONVERTER_NAME = "teille-douce"
 
-# metadata_livre.csv and metadata_personne.csv live in the local working
-# directory, the same place OCR/ and the converter's output land — they
-# are corpus-wide reference data the operator keeps beside the batch, not
-# something fetched from the NAS per run.
-METADATA_FILENAMES = ("metadata_livre.csv", "metadata_personne.csv")
-
 # "Archives average 30 MB" (design spec). The conversion then writes more
 # than it reads: TEI XML carries the OCR text plus every enrichment
 # token, modernized reading and NER span, and each document also leaves
@@ -271,25 +265,36 @@ def _check_services(settings):
 def _check_metadata(settings):
     """Coverage is not a gate — a document with no catalogue row still
     converts, with a header of placeholders and a warning. Only files
-    that cannot be read at all are a refusal."""
-    work_dir = Path(settings.work_dir)
+    that cannot be read at all are a refusal.
+
+    Reads `settings.metadata_csv` / `settings.persons_csv` directly
+    rather than inferring a location from `work_dir`. The converter's own
+    config discovery walks up the parent directories from wherever it is
+    run, so guessing a path here and passing a *different* one to
+    `run_converter()` would make this check meaningless — verifying a
+    file the run never actually reads. Checking the exact paths that
+    `run_converter()` passes as `--metadata`/`--persons` is what makes a
+    green check here mean something.
+    """
+    paths = {"metadata_csv": Path(settings.metadata_csv),
+            "persons_csv": Path(settings.persons_csv)}
     unreadable = []
-    for name in METADATA_FILENAMES:
-        path = work_dir / name
+    for path in paths.values():
         try:
             with path.open("rb") as handle:
                 handle.read(1)
         except OSError as why:
-            unreadable.append(f"{name} ({why.strerror or why})")
+            unreadable.append(f"{path} ({why.strerror or why})")
 
     if unreadable:
         return Check("Metadata", False,
                      "cannot read " + ", ".join(unreadable),
-                     f"put a readable metadata_livre.csv and "
-                     f"metadata_personne.csv in {work_dir} — missing rows "
-                     f"inside them are not a problem, an unreadable file is")
+                     "point --metadata/--persons (or TDSYNC_METADATA_CSV/"
+                     "TDSYNC_PERSONS_CSV) at readable catalogue files — "
+                     "missing rows inside them are not a problem, an "
+                     "unreadable file is")
     return Check("Metadata", True,
-                 "metadata_livre.csv and metadata_personne.csv are readable",
+                 f"{paths['metadata_csv']} and {paths['persons_csv']} are readable",
                  "")
 
 

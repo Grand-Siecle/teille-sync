@@ -13,7 +13,9 @@ GIB = 1024 * 1024 * 1024
 def _settings(**over):
     values = {"nas_root": Path("/nope"), "nas_host": "nas.example.invalid",
               "batch_size": 5, "reclaim_after": None, "project_url": "u",
-              "ids_file": Path("ids.json"), "work_dir": Path("work")}
+              "ids_file": Path("ids.json"), "work_dir": Path("work"),
+              "metadata_csv": Path("nonexistent-metadata.csv"),
+              "persons_csv": Path("nonexistent-persons.csv")}
     values.update(over)
     return Settings(values=values,
                     origins={k: "default" for k in values}, refusals=[])
@@ -39,6 +41,20 @@ def test_a_windows_drive_missing_from_wsl_gets_the_mount_command(tmp_path,
     root = _by(checks, "NAS root")
     assert root.ok is False
     assert "mount -t drvfs" in root.remedy
+    assert "sudo mount -t drvfs Y: /mnt/y" == root.remedy
+
+
+def test_the_mount_command_uses_the_letter_from_the_configured_root(
+        monkeypatch):
+    """A different drive letter must produce a different command — an
+    implementation with "Y:" hardcoded would pass the test above without
+    actually deriving the letter from nas_root."""
+    monkeypatch.setattr("teille_sync.preflight.on_wsl", lambda: True)
+    checks = preflight(_settings(nas_root=Path("/mnt/z")),
+                       probe=lambda h, **k: (True, ""))
+    root = _by(checks, "NAS root")
+    assert root.ok is False
+    assert root.remedy == "sudo mount -t drvfs Z: /mnt/z"
 
 
 def test_a_root_without_the_archives_folder_is_the_wrong_root(tmp_path):
@@ -226,9 +242,16 @@ def test_board_check_makes_no_network_call(tmp_path):
 
 
 # -- Metadata: only unreadable files are a refusal -----------------------
+#
+# The check reads settings.metadata_csv / settings.persons_csv directly —
+# the exact paths run_converter() passes as --metadata/--persons — rather
+# than inferring a location from work_dir, since the converter's own
+# config discovery walks up the parent directories from wherever it runs
+# and a guessed path here could pass while the run reads a different file.
 
 def test_metadata_check_refuses_when_both_catalogues_are_absent(tmp_path):
-    checks = preflight(_settings(work_dir=tmp_path),
+    checks = preflight(_settings(metadata_csv=tmp_path / "metadata_livre.csv",
+                                 persons_csv=tmp_path / "metadata_personne.csv"),
                        probe=lambda h, **k: (True, ""))
     metadata = _by(checks, "Metadata")
     assert metadata.ok is False
@@ -237,8 +260,10 @@ def test_metadata_check_refuses_when_both_catalogues_are_absent(tmp_path):
 
 
 def test_metadata_check_refuses_when_one_catalogue_is_missing(tmp_path):
-    (tmp_path / "metadata_livre.csv").write_text("id;title\n", encoding="utf-8")
-    checks = preflight(_settings(work_dir=tmp_path),
+    livre = tmp_path / "metadata_livre.csv"
+    livre.write_text("id;title\n", encoding="utf-8")
+    checks = preflight(_settings(metadata_csv=livre,
+                                 persons_csv=tmp_path / "metadata_personne.csv"),
                        probe=lambda h, **k: (True, ""))
     metadata = _by(checks, "Metadata")
     assert metadata.ok is False
@@ -248,10 +273,11 @@ def test_metadata_check_refuses_when_one_catalogue_is_missing(tmp_path):
 def test_metadata_check_refuses_on_an_unreadable_file(tmp_path):
     livre = tmp_path / "metadata_livre.csv"
     livre.write_text("id;title\n", encoding="utf-8")
-    (tmp_path / "metadata_personne.csv").write_text("id;name\n", encoding="utf-8")
+    persons = tmp_path / "metadata_personne.csv"
+    persons.write_text("id;name\n", encoding="utf-8")
     livre.chmod(0o000)
     try:
-        checks = preflight(_settings(work_dir=tmp_path),
+        checks = preflight(_settings(metadata_csv=livre, persons_csv=persons),
                            probe=lambda h, **k: (True, ""))
     finally:
         livre.chmod(0o644)  # tmp_path cleanup needs this back
@@ -259,9 +285,11 @@ def test_metadata_check_refuses_on_an_unreadable_file(tmp_path):
 
 
 def test_metadata_check_passes_on_two_readable_catalogues(tmp_path):
-    (tmp_path / "metadata_livre.csv").write_text("id;title\n", encoding="utf-8")
-    (tmp_path / "metadata_personne.csv").write_text("id;name\n", encoding="utf-8")
-    checks = preflight(_settings(work_dir=tmp_path),
+    livre = tmp_path / "metadata_livre.csv"
+    livre.write_text("id;title\n", encoding="utf-8")
+    persons = tmp_path / "metadata_personne.csv"
+    persons.write_text("id;name\n", encoding="utf-8")
+    checks = preflight(_settings(metadata_csv=livre, persons_csv=persons),
                        probe=lambda h, **k: (True, ""))
     assert _by(checks, "Metadata").ok is True
 
@@ -270,9 +298,27 @@ def test_metadata_coverage_is_not_a_gate_an_empty_catalogue_still_passes(tmp_pat
     """An empty file — zero rows, zero coverage — is still readable, and
     readability is the only thing this check tests. Coverage gaps are a
     per-document warning at conversion time, not a preflight refusal."""
-    (tmp_path / "metadata_livre.csv").write_text("", encoding="utf-8")
-    (tmp_path / "metadata_personne.csv").write_text("", encoding="utf-8")
-    checks = preflight(_settings(work_dir=tmp_path),
+    livre = tmp_path / "metadata_livre.csv"
+    livre.write_text("", encoding="utf-8")
+    persons = tmp_path / "metadata_personne.csv"
+    persons.write_text("", encoding="utf-8")
+    checks = preflight(_settings(metadata_csv=livre, persons_csv=persons),
+                       probe=lambda h, **k: (True, ""))
+    assert _by(checks, "Metadata").ok is True
+
+
+def test_metadata_check_uses_a_custom_location_not_work_dir(tmp_path):
+    """A catalogue that lives nowhere near work_dir must still pass — the
+    check must not silently look in work_dir instead of the configured
+    paths."""
+    catalogue_dir = tmp_path / "elsewhere"
+    catalogue_dir.mkdir()
+    livre = catalogue_dir / "metadata_livre.csv"
+    livre.write_text("id;title\n", encoding="utf-8")
+    persons = catalogue_dir / "metadata_personne.csv"
+    persons.write_text("id;name\n", encoding="utf-8")
+    checks = preflight(_settings(work_dir=tmp_path / "not-the-catalogue-dir",
+                                 metadata_csv=livre, persons_csv=persons),
                        probe=lambda h, **k: (True, ""))
     assert _by(checks, "Metadata").ok is True
 

@@ -64,10 +64,20 @@ def check_services(input_dir):
     return proc.returncode == 0, (proc.stdout or "") + (proc.stderr or "")
 
 
-def run_converter(docs, input_dir, output_dir, plain=False):
+def run_converter(docs, input_dir, output_dir, metadata_csv, persons_csv,
+                  plain=False):
     """One invocation for the whole batch: services are probed once, and
     `--require-services` makes a phase whose service is down fatal before
     anything is written. Output is streamed straight through.
+
+    `metadata_csv` and `persons_csv` are required, not defaulted: the
+    converter's own config discovery walks up the parent directories from
+    wherever it is run, so a sync invoked from anywhere but the
+    TEIlle-douce checkout would otherwise have it looking somewhere this
+    tool's own Metadata preflight check never verified — a green check,
+    then placeholder headers fifteen minutes later. Passing both
+    explicitly is what closes that gap; an optional parameter here would
+    just reopen it under a different name.
 
     Returns the child's exit code. 3 means it refused — a service went
     away between the preflight and here — and nothing was written, so the
@@ -75,6 +85,7 @@ def run_converter(docs, input_dir, output_dir, plain=False):
     """
     argv = ["teille-douce", "run", *docs,
             "-i", str(input_dir), "-o", str(output_dir),
+            "--metadata", str(metadata_csv), "--persons", str(persons_csv),
             "--phases", "all", "--require-services"]
     if plain or not sys.stdout.isatty():
         argv.append("--plain")

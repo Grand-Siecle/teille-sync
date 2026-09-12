@@ -20,6 +20,8 @@ DEFAULTS = {
     "project_url": None,
     "ids_file": Path("project-board-ids.json"),
     "work_dir": Path("work"),
+    "metadata_csv": Path("metadata_livre.csv"),
+    "persons_csv": Path("metadata_personne.csv"),
 }
 
 
@@ -53,6 +55,8 @@ CONVERTERS = {
     "work_dir": Path,
     "nas_host": str,
     "project_url": str,
+    "metadata_csv": Path,
+    "persons_csv": Path,
 }
 
 

@@ -1,7 +1,9 @@
 import json
+import pytest
 from pathlib import Path
 from unittest.mock import MagicMock, call
-from teille_sync.convert import latest_run, read_manifest, read_incidents, validate, check_services
+from teille_sync.convert import (latest_run, read_manifest, read_incidents,
+                                 validate, check_services, run_converter)
 
 
 def _run(root, stamp, manifest=None, incidents=()):
@@ -103,6 +105,75 @@ def test_check_services_returns_fail_when_exitcode_nonzero(monkeypatch):
     assert ok is False
     assert "stdout message" in output
     assert "stderr message" in output
+
+
+def test_run_converter_passes_metadata_and_persons_flags(monkeypatch):
+    """The converter's own config discovery walks up the parent
+    directories from wherever it runs — teille-sync must be explicit
+    rather than let a sync invoked from elsewhere inherit whatever
+    discovery finds. This is the test that fails if `--metadata` /
+    `--persons` are ever dropped from argv again."""
+    seen = {}
+
+    def mock_run(argv, **kwargs):
+        seen["argv"] = argv
+        result = MagicMock()
+        result.returncode = 0
+        return result
+
+    import teille_sync.convert
+    monkeypatch.setattr(teille_sync.convert.subprocess, "run", mock_run)
+
+    run_converter(["LIV0001_reconciled"], "OCR", "tei_output",
+                  Path("cat/metadata_livre.csv"), Path("cat/metadata_personne.csv"))
+
+    argv = seen["argv"]
+    assert "--metadata" in argv
+    assert argv[argv.index("--metadata") + 1] == "cat/metadata_livre.csv"
+    assert "--persons" in argv
+    assert argv[argv.index("--persons") + 1] == "cat/metadata_personne.csv"
+
+
+def test_run_converter_still_requires_all_phases_and_services(monkeypatch):
+    seen = {}
+
+    def mock_run(argv, **kwargs):
+        seen["argv"] = argv
+        result = MagicMock()
+        result.returncode = 0
+        return result
+
+    import teille_sync.convert
+    monkeypatch.setattr(teille_sync.convert.subprocess, "run", mock_run)
+
+    run_converter(["LIV0001_reconciled"], "OCR", "tei_output",
+                  Path("metadata_livre.csv"), Path("metadata_personne.csv"))
+
+    argv = seen["argv"]
+    assert "--phases" in argv and argv[argv.index("--phases") + 1] == "all"
+    assert "--require-services" in argv
+
+
+def test_run_converter_returns_the_childs_exit_code(monkeypatch):
+    def mock_run(argv, **kwargs):
+        result = MagicMock()
+        result.returncode = 3
+        return result
+
+    import teille_sync.convert
+    monkeypatch.setattr(teille_sync.convert.subprocess, "run", mock_run)
+
+    code = run_converter(["LIV0001_reconciled"], "OCR", "tei_output",
+                         Path("metadata_livre.csv"), Path("metadata_personne.csv"))
+    assert code == 3
+
+
+def test_run_converter_requires_metadata_csv_and_persons_csv():
+    """Required positional, not optional-with-a-default: an optional
+    parameter here would silently reopen the config-discovery trap this
+    signature exists to close."""
+    with pytest.raises(TypeError):
+        run_converter(["LIV0001_reconciled"], "OCR", "tei_output")
 
 
 CLEAN = {"applied": ["python invariants"], "errors": 0,
