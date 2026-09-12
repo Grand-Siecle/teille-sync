@@ -100,11 +100,18 @@ teille-sync ids refresh    # rebuild project-board-ids.json from the live board
   board. `--batches N` runs exactly N batches (default 1); `--until-done`
   keeps going until nothing is left to claim. `--dry-run` prints which
   documents would be claimed without claiming any of them.
-  `--republish` overwrites a document already on the share; `--keep`
-  never deletes a local copy, converted or not. `--reclaim-after`
-  overrides how long a claim can sit `En cours` before this run takes it
-  back. `-v` always prints the preflight table; `-q` prints only the
-  closing summary, not the per-batch table.
+  `--republish` overwrites a document already on the share — in either
+  folder: a document is only ever in `tei/` or in `tei/_a_verifier/`,
+  never both. `--keep` never deletes a local copy, converted or not.
+  `--reclaim-after` overrides how long a claim can sit `En cours` before
+  this run takes it back. `-v` always prints the preflight table; `-q`
+  prints only the closing summary, not the per-batch table. `--plain`
+  drops colour here *and* in the converter it invokes.
+
+  `--until-done` also stops after any batch that claimed nothing while
+  the board still has cards `À traiter` — another machine holding them,
+  or claiming failing, would otherwise loop for ever making no
+  progress.
 - **`check`** runs the same eight checks `run` runs before touching
   anything (VPN, NAS root, Destination, Board, Converter, Services,
   Metadata, Disk), and writes nothing — safe to run at any time,

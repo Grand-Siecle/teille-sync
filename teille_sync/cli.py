@@ -9,7 +9,7 @@ through the one `Console` `main()` constructed.
 
 `main(argv=None) -> int` never raises: an argparse usage error, a
 `SettingsError`, an `exits.refuse()` call, a `KeyboardInterrupt`, and the
-two the board itself raises — `BoardTransportError` and `StaleIdFile` —
+two the board itself raises — `BoardTransportError` and `BoardError` —
 are all caught here and turned into the exit code they mean, so a caller
 never has to `except SystemExit` to learn what happened.
 """
@@ -24,10 +24,11 @@ from pathlib import Path
 
 import httpx
 from rich.console import Console
+from rich.text import Text
 
 from teille_sync import exits, report
 from teille_sync.batch import run_batch
-from teille_sync.board import Board, StaleIdFile
+from teille_sync.board import Board, BoardError
 from teille_sync.preflight import preflight
 from teille_sync.settings import SettingsError, resolve
 
@@ -266,7 +267,7 @@ def _cmd_ids_refresh(settings, console):
 
 
 def _cmd_run(settings, console, *, batches, until_done, republish, keep,
-            dry_run, quiet, verbose):
+            dry_run, quiet, verbose, plain):
     if dry_run:
         # Dry run never calls run_batch(), so it is the one path with no
         # BatchResult to read `.checks` off of — it has to probe
@@ -313,7 +314,7 @@ def _cmd_run(settings, console, *, batches, until_done, republish, keep,
         # across *iterations* stays correct (a service can die between
         # batches); a second probe of the *same* batch is pure waste.
         result = run_batch(settings, board, now_fn(),
-                           republish=republish, keep=keep)
+                           republish=republish, keep=keep, plain=plain)
         ran += 1
         if verbose or any(not c.ok for c in result.checks):
             console.print(report.preflight_table(result.checks))
@@ -325,6 +326,21 @@ def _cmd_run(settings, console, *, batches, until_done, republish, keep,
             # Preflight refused, or the converter did before writing
             # anything: nothing about the world changed, so looping
             # again would just repeat the same refusal.
+            break
+        if until_done and not result.claimed:
+            # `--until-done` decides its own length from the board, and
+            # the board said there was something to take. A batch that
+            # took none of it made no progress, and the next iteration
+            # would find the same board and make the same none —
+            # for ever. Every card lost to another machine does this,
+            # and so does anything that keeps `claim()` from succeeding.
+            # `--batches N` needs no such guard: N is a count a person
+            # typed.
+            console.print(Text(
+                "stopping: this batch claimed nothing while the board "
+                "still has cards à traiter — another machine may hold "
+                "them, or claiming is failing; nothing would change by "
+                "running again"))
             break
     return overall
 
@@ -408,7 +424,8 @@ def _dispatch(args):
         return _cmd_run(settings, console, batches=args.batches,
                         until_done=args.until_done, republish=args.republish,
                         keep=args.keep, dry_run=args.dry_run,
-                        quiet=args.quiet, verbose=args.verbose)
+                        quiet=args.quiet, verbose=args.verbose,
+                        plain=getattr(args, "plain", False))
     if args.command == "check":
         return _cmd_check(settings, console)
     if args.command == "status":
@@ -425,7 +442,7 @@ def main(argv=None):
     try:
         args = parser.parse_args(argv)
         return _dispatch(args)
-    except (BoardTransportError, StaleIdFile) as why:
+    except (BoardTransportError, BoardError) as why:
         # The two the docstring above promised and the code did not
         # deliver. `_http_transport` raises `BoardTransportError` on any
         # GitHub error and `board.py` raises `StaleIdFile` for a field or

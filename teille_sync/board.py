@@ -13,6 +13,7 @@ writing nowhere. The same holds for a missing `Status` option: see
 skipping.
 """
 
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -43,7 +44,31 @@ query($p:ID!,$c:String){ node(id:$p){ ... on ProjectV2{
 TODO, WIP = "À traiter", "En cours"
 
 
-class StaleIdFile(KeyError):
+class BoardError(Exception):
+    """The board is not in a state this tool can work against. Raised
+    before anything is written, and turned into exit 3 by `cli.main`."""
+
+
+class DuplicateCards(BoardError):
+    """Two cards carry the same title.
+
+    `run_batch` keys `outcomes`, `published` and `fetched_path` on the
+    identifier, so two cards titled `LIV0001` collapse onto one verdict:
+    one is written, the other silently keeps whatever it had, and no
+    count anywhere says a document went missing. Nothing downstream can
+    tell them apart, so this refuses at the point the cards are read.
+    """
+
+    def __init__(self, identifiers):
+        self.identifiers = list(identifiers)
+        shown = ", ".join(repr(i) for i in self.identifiers)
+        super().__init__(
+            f"the board has more than one card titled {shown} — one card "
+            f"per document, or a verdict lands on one of them and the "
+            f"others keep whatever they had; fix the board and re-run")
+
+
+class StaleIdFile(BoardError, KeyError):
     """The board does not have something the id file says it has: a
     field, or a `Status` option. Either way the file was built against a
     board that has since changed, and nothing written through it can be
@@ -197,6 +222,18 @@ class Board:
             if not page_info.get("hasNextPage"):
                 break
             cursor = page_info.get("endCursor")
+
+        # One card per document, checked here rather than trusted: every
+        # dict `run_batch` builds is keyed on the identifier, so a second
+        # card with the same title does not fail, it disappears — its
+        # verdict overwrites or is overwritten, and nothing counts the
+        # loss. Checked across the whole board and not only the pending
+        # slice: the twin can sit in any status.
+        repeated = sorted(name for name, count
+                          in Counter(card.identifier for card in cards).items()
+                          if count > 1)
+        if repeated:
+            raise DuplicateCards(repeated)
         return cards
 
     def all_cards(self):

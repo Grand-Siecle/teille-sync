@@ -18,7 +18,7 @@ import pytest
 
 from teille_sync import cli, exits
 from teille_sync.batch import BatchResult
-from teille_sync.board import TODO, WIP, Board, Card, StaleIdFile
+from teille_sync.board import TODO, WIP, Board, Card, DuplicateCards, StaleIdFile
 from teille_sync.preflight import Check
 from teille_sync.settings import Settings
 from teille_sync.verdict import DONE
@@ -216,7 +216,7 @@ def test_batches_n_runs_exactly_n_batches(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "now_fn", lambda: NOW)
     calls = []
     monkeypatch.setattr(cli, "run_batch", lambda settings, board, now,
-                        republish, keep: (calls.append(now) or BatchResult(exit_code=exits.OK)))
+                        republish, keep, plain: (calls.append(now) or BatchResult(exit_code=exits.OK)))
 
     code = cli.main(["run", "--batches", "3"])
 
@@ -230,7 +230,7 @@ def test_no_count_flag_defaults_to_one_batch(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "now_fn", lambda: NOW)
     calls = []
     monkeypatch.setattr(cli, "run_batch", lambda settings, board, now,
-                        republish, keep: (calls.append(1) or BatchResult(exit_code=exits.OK)))
+                        republish, keep, plain: (calls.append(1) or BatchResult(exit_code=exits.OK)))
 
     cli.main(["run"])
 
@@ -243,8 +243,15 @@ def test_until_done_stops_when_pending_is_empty(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_open_board", lambda s: board)
     monkeypatch.setattr(cli, "now_fn", lambda: NOW)
     calls = []
-    monkeypatch.setattr(cli, "run_batch", lambda settings, b, now,
-                        republish, keep: (calls.append(1) or BatchResult(exit_code=exits.OK)))
+
+    def fake_run_batch(settings, b, now, republish, keep, plain):
+        # A batch that claimed what pending() offered it. The count
+        # matters: an iteration that claims nothing is the zero-progress
+        # case, and the loop stops on that instead of spinning.
+        calls.append(1)
+        return BatchResult(exit_code=exits.OK, claimed=["LIV0001"])
+
+    monkeypatch.setattr(cli, "run_batch", fake_run_batch)
 
     code = cli.main(["run", "--until-done"])
 
@@ -262,7 +269,7 @@ def test_a_misconfigured_batch_stops_the_loop_even_with_batches_remaining(
     monkeypatch.setattr(cli, "now_fn", lambda: NOW)
     calls = []
     monkeypatch.setattr(cli, "run_batch", lambda settings, board, now,
-                        republish, keep: (calls.append(1) or
+                        republish, keep, plain: (calls.append(1) or
                                          BatchResult(exit_code=exits.MISCONFIGURED,
                                                     message="a service is down")))
 
@@ -293,7 +300,7 @@ def test_preflight_is_invoked_exactly_once_per_batch_iteration(monkeypatch, tmp_
     monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
     monkeypatch.setattr(cli, "now_fn", lambda: NOW)
 
-    def fake_run_batch(settings, board, now, republish, keep):
+    def fake_run_batch(settings, board, now, republish, keep, plain):
         # Mirrors what the real run_batch() does: one preflight() call,
         # carried back on .checks. If _cmd_run also called cli.preflight
         # itself (the bug Finding 2 describes), `calls` would come out
@@ -319,7 +326,7 @@ def test_a_failed_batchs_checks_are_still_shown_with_their_remedy(
     monkeypatch.setattr(cli, "now_fn", lambda: NOW)
     failing_checks = [Check("VPN", False, "no route", "bring up the VPN")]
     monkeypatch.setattr(cli, "run_batch", lambda settings, board, now,
-                        republish, keep: BatchResult(
+                        republish, keep, plain: BatchResult(
                             exit_code=exits.MISCONFIGURED,
                             message="preflight refused — VPN: no route",
                             checks=failing_checks))
@@ -403,7 +410,7 @@ def test_a_board_transport_error_leaves_by_the_front_door(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
     monkeypatch.setattr(cli, "now_fn", lambda: NOW)
 
-    def transport_died(settings, board, now, republish, keep):
+    def transport_died(settings, board, now, republish, keep, plain):
         raise cli.BoardTransportError("the board did not answer: 502")
 
     monkeypatch.setattr(cli, "run_batch", transport_died)
@@ -442,6 +449,20 @@ def test_a_stale_id_file_mid_run_is_a_refusal_not_a_traceback(monkeypatch,
     assert code == exits.MISCONFIGURED
 
 
+
+def test_two_cards_for_one_document_is_a_refusal_not_a_traceback(monkeypatch,
+                                                                 tmp_path):
+    """`board._all_cards` refuses a board with two cards for one
+    identifier — they collapse onto one verdict downstream. That is exit
+    3, like every other "the board cannot be trusted" answer."""
+    _stub_settings(monkeypatch, _settings(tmp_path))
+    monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
+    monkeypatch.setattr(cli, "now_fn", lambda: NOW)
+    monkeypatch.setattr(cli, "run_batch", lambda *a, **k: (_ for _ in ()).throw(
+        DuplicateCards(["LIV0001"])))
+
+    assert cli.main(["run"]) == exits.MISCONFIGURED
+
 def test_verbose_and_quiet_together_is_a_usage_error():
     assert cli.main(["run", "-v", "-q"]) == exits.USAGE
 
@@ -452,7 +473,7 @@ def test_verbose_shows_the_preflight_table_on_a_clean_pass(monkeypatch, tmp_path
     monkeypatch.setattr(cli, "now_fn", lambda: NOW)
     checks = _passing_checks()
     monkeypatch.setattr(cli, "run_batch", lambda settings, board, now,
-                        republish, keep: BatchResult(exit_code=exits.OK, checks=checks))
+                        republish, keep, plain: BatchResult(exit_code=exits.OK, checks=checks))
 
     cli.main(["run"])
     quiet_out = capsys.readouterr().out
@@ -478,7 +499,7 @@ def test_quiet_suppresses_the_batch_table_but_never_a_loss(monkeypatch, tmp_path
                          message="the converter refused before writing anything: "
                                  "a required service is down")
     monkeypatch.setattr(cli, "run_batch", lambda settings, board, now,
-                        republish, keep: result)
+                        republish, keep, plain: result)
 
     code = cli.main(["run", "-q"])
 
@@ -688,3 +709,94 @@ def test_open_board_refuses_cleanly_on_a_malformed_but_valid_json_ids_file(
     settings = _settings(tmp_path, ids_file=ids_path)
     with pytest.raises(cli.BoardTransportError):
         cli._open_board(settings)
+
+
+# -- --until-done never spins ------------------------------------------------
+
+def test_until_done_stops_after_a_batch_that_claimed_nothing(monkeypatch,
+                                                             tmp_path):
+    """A board whose pending list never empties — every card lost to
+    another machine, or a preflight that keeps refusing — made
+    `--until-done` loop for ever. An iteration with no progress is the
+    end of the run."""
+    board = FakeBoard(pending_answers=[["LIV0001"]] * 20)
+    _stub_settings(monkeypatch, _settings(tmp_path))
+    monkeypatch.setattr(cli, "_open_board", lambda s: board)
+    monkeypatch.setattr(cli, "now_fn", lambda: NOW)
+    calls = []
+    monkeypatch.setattr(cli, "run_batch", lambda settings, b, now, republish,
+                        keep, plain: (calls.append(1) or
+                                      BatchResult(exit_code=exits.OK)))
+
+    code = cli.main(["run", "--until-done"])
+
+    assert len(calls) == 1
+    assert code == exits.OK
+
+
+def test_until_done_says_why_it_stopped_claiming_nothing(monkeypatch, tmp_path,
+                                                         capsys):
+    board = FakeBoard(pending_answers=[["LIV0001"]] * 20)
+    _stub_settings(monkeypatch, _settings(tmp_path))
+    monkeypatch.setattr(cli, "_open_board", lambda s: board)
+    monkeypatch.setattr(cli, "now_fn", lambda: NOW)
+    monkeypatch.setattr(cli, "run_batch", lambda settings, b, now, republish,
+                        keep, plain: BatchResult(exit_code=exits.OK))
+
+    cli.main(["run", "--until-done"])
+
+    out = capsys.readouterr().out
+    assert "claimed nothing" in out or "claimed no card" in out
+    assert "traiter" in out   # …while the board still has cards à traiter
+
+
+def test_batches_does_not_stop_early_on_a_batch_that_claimed_nothing(
+        monkeypatch, tmp_path):
+    """`--batches N` means exactly N, and a batch that claims nothing is
+    still a batch. Only `--until-done`, which decides its own length,
+    needs the guard."""
+    _stub_settings(monkeypatch, _settings(tmp_path))
+    monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
+    monkeypatch.setattr(cli, "now_fn", lambda: NOW)
+    calls = []
+    monkeypatch.setattr(cli, "run_batch", lambda settings, b, now, republish,
+                        keep, plain: (calls.append(1) or
+                                      BatchResult(exit_code=exits.OK)))
+
+    cli.main(["run", "--batches", "3"])
+
+    assert len(calls) == 3
+
+
+# -- --plain reaches the child -----------------------------------------------
+
+def test_plain_is_threaded_through_to_run_batch(monkeypatch, tmp_path):
+    """`run_batch` had no `plain` parameter, so `convert.run_converter`
+    only ever fell back to its own TTY test and the flag did nothing to
+    the child."""
+    _stub_settings(monkeypatch, _settings(tmp_path))
+    monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
+    monkeypatch.setattr(cli, "now_fn", lambda: NOW)
+    seen = {}
+    monkeypatch.setattr(cli, "run_batch", lambda settings, b, now, republish,
+                        keep, plain: (seen.update(plain=plain) or
+                                      BatchResult(exit_code=exits.OK)))
+
+    cli.main(["run", "--plain"])
+
+    assert seen["plain"] is True
+
+
+def test_without_plain_the_child_is_left_to_its_own_tty_test(monkeypatch,
+                                                             tmp_path):
+    _stub_settings(monkeypatch, _settings(tmp_path))
+    monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
+    monkeypatch.setattr(cli, "now_fn", lambda: NOW)
+    seen = {}
+    monkeypatch.setattr(cli, "run_batch", lambda settings, b, now, republish,
+                        keep, plain: (seen.update(plain=plain) or
+                                      BatchResult(exit_code=exits.OK)))
+
+    cli.main(["run"])
+
+    assert seen["plain"] is False

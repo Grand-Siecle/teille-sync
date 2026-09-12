@@ -22,9 +22,11 @@ something dies halfway:
   verdict's own `Détail`, and pushes the exit code to `SOME_FAILED` — it
   does not invent a new status.
 * **The converter's exit code 3 means it refused before writing anything**
-  (`--require-services`, a service down between the preflight probe and
-  the run). Every card claimed this batch goes back to `À traiter`
-  unjudged: a card reading `Échec` for a document that was never opened
+  — `--require-services` with a service down between the preflight probe
+  and the run, but also an unreadable catalogue or a setting it refused:
+  this code does not guess which, it says what it knows and points at
+  the converter's own output. Every card claimed this batch goes back to
+  `À traiter` unjudged: a card reading `Échec` for a document that was never opened
   is the same lie as a loss counter left at zero by a dead service.
 * **A share that goes away is not five documents that are missing.**
   `nas.fetch` says "is not on the share" for an absent archive and for a
@@ -211,7 +213,8 @@ def _delete_local_source(input_dir, identifier):
         shutil.rmtree(expanded, ignore_errors=True)
 
 
-def run_batch(settings, board, now, republish=False, keep=False):
+def run_batch(settings, board, now, republish=False, keep=False,
+              plain=False):
     # -- 0. Preflight ---------------------------------------------------
     checks = preflight(settings)
     failing = [c for c in checks if not c.ok]
@@ -293,7 +296,7 @@ def run_batch(settings, board, now, republish=False, keep=False):
         if pipeline_docs:
             converter_exit = run_converter(pipeline_docs, input_dir, output_dir,
                                            settings.metadata_csv, settings.persons_csv,
-                                           settings.entities_dir)
+                                           settings.entities_dir, plain=plain)
             if converter_exit == 3:
                 # Nothing was written. Blaming a document that was never
                 # opened would be the same lie as a loss counter left at
@@ -302,8 +305,18 @@ def run_batch(settings, board, now, republish=False, keep=False):
                     board.release(card)
                 result.released = [c.identifier for c in claimed]
                 result.exit_code = exits.MISCONFIGURED
-                result.message = ("the converter refused before writing "
-                                  "anything: a required service is down")
+                # What is known, and no more: teille-douce exits 3 for
+                # a service that stopped answering *and* for an
+                # unreadable catalogue, an output it cannot write, a
+                # setting it refused. Naming one of them here was a
+                # guess, and a guess that sends someone to restart a
+                # service that is running. Its own words went to the
+                # terminal — this points at them rather than
+                # paraphrasing what it might have said.
+                result.message = (
+                    f"the converter refused before writing anything "
+                    f"(exit {converter_exit}) — its reason is in its own "
+                    f"output above; every claim was released")
                 return result
 
             notes = []

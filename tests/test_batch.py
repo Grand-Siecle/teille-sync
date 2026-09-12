@@ -758,6 +758,68 @@ def test_require_services_refusing_releases_every_claim(tmp_path, monkeypatch):
     assert result.outcomes == {}
 
 
+def test_a_converter_refusal_does_not_guess_which_service_died(tmp_path,
+                                                                monkeypatch):
+    """teille-douce exits 3 for several misconfigurations, not only a
+    service that stopped answering: an unreadable catalogue, an output it
+    cannot write, a setting it refused. Releasing is right; naming a
+    cause nobody measured is not."""
+    identifiers = _five()
+    root = _share(tmp_path, identifiers)
+    _patch_common(monkeypatch, {"documents": {}}, exit_code=3)
+    board = FakeBoard(_cards(identifiers))
+
+    result = batch.run_batch(_settings(tmp_path, root), board, NOW)
+
+    assert "service is down" not in result.message
+    # What is actually known: it refused, it wrote nothing, and its own
+    # words went to the terminal.
+    assert "refused before writing anything" in result.message
+    assert "3" in result.message
+
+
+def test_plain_reaches_the_converter(tmp_path, monkeypatch):
+    """`--plain` existed on `teille-sync run` and never travelled: the
+    child only ever fell back to its own TTY test, so a run piped to a
+    log file from a terminal that *is* a TTY still got colour codes."""
+    identifiers = ["LIV0001"]
+    root = _share(tmp_path, identifiers)
+    seen = {}
+
+    def spy(docs, input_dir, output_dir, metadata_csv, persons_csv,
+            entities_dir, plain=False):
+        seen["plain"] = plain
+        return 3
+
+    monkeypatch.setattr(batch, "preflight", lambda settings: _passing_checks())
+    monkeypatch.setattr(batch, "run_converter", spy)
+    board = FakeBoard(_cards(identifiers))
+
+    batch.run_batch(_settings(tmp_path, root, batch_size=1), board, NOW,
+                    plain=True)
+
+    assert seen["plain"] is True
+
+
+def test_plain_defaults_to_false_and_is_still_passed(tmp_path, monkeypatch):
+    identifiers = ["LIV0001"]
+    root = _share(tmp_path, identifiers)
+    seen = {}
+
+    def spy(docs, input_dir, output_dir, metadata_csv, persons_csv,
+            entities_dir, plain=False):
+        seen["plain"] = plain
+        return 3
+
+    monkeypatch.setattr(batch, "preflight", lambda settings: _passing_checks())
+    monkeypatch.setattr(batch, "run_converter", spy)
+    board = FakeBoard(_cards(identifiers))
+
+    batch.run_batch(_settings(tmp_path, root, batch_size=1), board, NOW)
+
+    assert seen["plain"] is False
+
+
 def test_a_released_batch_is_not_five_failures_on_the_board(tmp_path, monkeypatch):
     identifiers = _five()
     root = _share(tmp_path, identifiers)

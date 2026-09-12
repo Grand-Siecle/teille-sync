@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 import pytest
-from teille_sync.board import Board, Card
+from teille_sync.board import Board, Card, DuplicateCards
 from teille_sync.verdict import Verdict
 
 IDS = {
@@ -390,3 +390,43 @@ def test_stale_pages_through_the_whole_board():
     assert [c.identifier for c in cards] == ["LIV0001", "LIV0003"]
     assert len(t.calls) == 2
     assert t.calls[1][1]["c"] == "CURSOR_1"
+
+
+# -- two cards for one document ----------------------------------------------
+
+def test_two_cards_with_the_same_title_are_refused_and_named():
+    """`run_batch` keys `outcomes`, `published` and `fetched_path` on the
+    identifier, so two cards titled `LIV0001` collapse onto one verdict:
+    one of the two gets written, the other silently keeps whatever it had.
+    Nothing downstream can tell them apart, so the board has to be fixed
+    before anything runs."""
+    nodes = [
+        _node("I_1", "LIV0001", status="À traiter", detail=""),
+        _node("I_2", "LIV0002", status="À traiter", detail=""),
+        _node("I_3", "LIV0001", status="Terminé", detail=""),
+    ]
+    board = Board(IDS, Recorder([_page(nodes)]))
+
+    with pytest.raises(DuplicateCards) as excinfo:
+        board.pending()
+
+    assert "LIV0001" in str(excinfo.value)
+    assert "LIV0002" not in str(excinfo.value)
+
+
+def test_a_duplicate_on_a_later_page_is_caught_too():
+    page1 = _page([_node("I_1", "LIV0001", status="À traiter", detail="")],
+                  has_next=True, cursor="CURSOR_1")
+    page2 = _page([_node("I_9", "LIV0001", status="Échec", detail="")])
+    board = Board(IDS, Recorder([page1, page2]))
+
+    with pytest.raises(DuplicateCards):
+        board.all_cards()
+
+
+def test_a_board_with_no_duplicates_is_left_alone():
+    nodes = [_node("I_1", "LIV0001", status="À traiter", detail=""),
+             _node("I_2", "LIV0002", status="Terminé", detail="")]
+    board = Board(IDS, Recorder([_page(nodes)]))
+
+    assert [c.identifier for c in board.all_cards()] == ["LIV0001", "LIV0002"]
