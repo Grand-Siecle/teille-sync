@@ -6,3 +6,5 @@ config.local.toml
 project-board-ids.json
 work/
 .coverage*
+build/
+dist/
