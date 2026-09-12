@@ -26,6 +26,12 @@ something dies halfway:
   the run). Every card claimed this batch goes back to `À traiter`
   unjudged: a card reading `Échec` for a document that was never opened
   is the same lie as a loss counter left at zero by a dead service.
+* **A converter that dies without writing a run record is not a converter
+  that wrote nothing.** `output_dir` persists across batches, and
+  teille-douce only writes `run.json` on a clean exit. `latest_run()` is
+  read before *and* after the call, and an unchanged (or missing) run
+  directory means this batch's own documents judge as if nothing had
+  converted — never against whatever the previous batch left behind.
 
 A `KeyboardInterrupt` anywhere between claiming and judging is caught here,
 releases every card claimed but not yet judged (`verdict.decide()` has not
@@ -48,17 +54,6 @@ from teille_sync.convert import (latest_run, read_incidents, read_manifest,
 from teille_sync.names import pipeline_name
 from teille_sync.preflight import CONVERTER_NAME, preflight
 from teille_sync.verdict import DONE, REVIEW, decide
-
-# The default location the converter's own `--entities` writes to
-# (`config.DEFAULT_ENTITIES_DIR = "entities"`) is relative to *its own*
-# current working directory. `run_converter()` invokes it without a `cwd=`
-# override, so the child inherits teille-sync's own cwd — the same
-# reference point used here. If that assumption is ever wrong (a future
-# teille-douce release changes the default, or something runs teille-sync
-# from an unexpected directory), `nas.publish()` degrades safely: a
-# missing `entities_dir` is skipped, not fatal, and the TEI itself still
-# publishes.
-_ENTITIES_DIR = Path("entities")
 
 # One `<surface>` per page in teille-douce's own output (confirmed against
 # the project's real fixtures: 190 `<surface>` and 190 `<pb>` on the same
@@ -153,9 +148,14 @@ def _append_detail(verdict, note):
 
 def _delete_local_source(input_dir, identifier):
     """What `fetch()` left behind for one document: the archive itself,
-    and anything the converter expanded from it under the same name."""
+    and anything the converter expanded from it under the same name.
+
+    The archive's local name comes from `pipeline_name()`, not a
+    hand-written `f"{identifier}_reconciled.zip"` — `names.py` is the one
+    place that suffix is spelled out; anywhere else it can drift silently
+    out of sync with `nas.fetch()`'s own naming."""
     input_dir = Path(input_dir)
-    (input_dir / f"{identifier}_reconciled.zip").unlink(missing_ok=True)
+    (input_dir / f"{pipeline_name(identifier)}.zip").unlink(missing_ok=True)
     expanded = input_dir / pipeline_name(identifier)
     if expanded.is_dir():
         shutil.rmtree(expanded, ignore_errors=True)
@@ -205,18 +205,30 @@ def run_batch(settings, board, now, republish=False, keep=False):
 
         # -- 2. Fetch -----------------------------------------------------
         fetched_path = {}
+        fetch_reason = {}
         for card in claimed:
-            local, _reason = nas.fetch(settings.nas_root, card.identifier, input_dir)
+            local, reason = nas.fetch(settings.nas_root, card.identifier, input_dir)
             fetched_path[card.identifier] = local
+            if local is None:
+                fetch_reason[card.identifier] = reason
 
         pipeline_docs = [pipeline_name(c.identifier) for c in claimed
                         if fetched_path[c.identifier] is not None]
 
         # -- 3. Convert (one call for the whole batch) ---------------------
+        # Captured *before* the call: `output_dir` persists across
+        # batches, and teille-douce's own store only writes `run.json` on
+        # a clean exit. A converter killed partway through (an OOM is
+        # plausible on this corpus) leaves whatever run directory was
+        # already there — this batch's own documents must not be judged
+        # against a previous batch's manifest just because it happens to
+        # still be the newest thing in `output_dir`.
+        run_dir_before = latest_run(output_dir)
         manifest, incidents, validation = {}, [], {}
         if pipeline_docs:
             converter_exit = run_converter(pipeline_docs, input_dir, output_dir,
-                                           settings.metadata_csv, settings.persons_csv)
+                                           settings.metadata_csv, settings.persons_csv,
+                                           settings.entities_dir)
             if converter_exit == 3:
                 # Nothing was written. Blaming a document that was never
                 # opened would be the same lie as a loss counter left at
@@ -229,19 +241,45 @@ def run_batch(settings, board, now, republish=False, keep=False):
                                   "anything: a required service is down")
                 return result
 
+            notes = []
+            if converter_exit != 0:
+                notes.append(f"the converter exited {converter_exit}")
+
             # -- 4. Validate ------------------------------------------------
             run_dir = latest_run(output_dir)
-            if run_dir is not None:
+            if run_dir is None or run_dir == run_dir_before:
+                # No new run was recorded for this batch's documents — a
+                # crash before the converter's own `store.finish()` could
+                # write one. Judging against `run_dir_before` (someone
+                # else's manifest, possibly for entirely different
+                # documents) would credit or blame this batch for records
+                # that are not its own, so every document here judges as
+                # if the run had produced nothing at all.
+                notes.append("the converter left no run record for this batch")
+            else:
                 manifest = read_manifest(run_dir)
                 incidents = read_incidents(run_dir)
-            validation = validate(output_dir, pipeline_docs)
+                validation = validate(output_dir, pipeline_docs)
+
+            if notes:
+                result.message = "; ".join(notes)
 
         # -- 5. Judge ---------------------------------------------------------
         outcomes = {}
         for card in claimed:
             doc = pipeline_name(card.identifier)
-            verdict = decide(doc, manifest, incidents, validation.get(doc),
-                             fetched_path[card.identifier] is not None)
+            was_fetched = fetched_path[card.identifier] is not None
+            verdict = decide(doc, manifest, incidents, validation.get(doc), was_fetched)
+            if not was_fetched and fetch_reason.get(card.identifier):
+                # `decide()` always writes the same generic "the archive
+                # was never fetched" — true, but it throws away *why*:
+                # absent from the share, a truncated copy, an archive
+                # that will not open. The real reason from `nas.fetch()`
+                # is appended rather than replacing verdict.py's own
+                # label, so "Absent du NAS" still names the right cause
+                # even for a truncated copy (a corrupt archive is not on
+                # the share in any usable sense either).
+                verdict = _append_detail(verdict, fetch_reason[card.identifier])
             outcomes[card.identifier] = verdict
             judged.add(card.identifier)
 
@@ -252,7 +290,7 @@ def run_batch(settings, board, now, republish=False, keep=False):
             if verdict.status not in (DONE, REVIEW):
                 continue   # Bloqué / Échec: nothing leaves the machine
             tei_path = output_dir / f"{pipeline_name(card.identifier)}.tei.xml"
-            entities = _ENTITIES_DIR / pipeline_name(card.identifier)
+            entities = Path(settings.entities_dir) / pipeline_name(card.identifier)
             ok, reason = nas.publish(
                 tei_path, entities if entities.is_dir() else None,
                 settings.nas_root, card.identifier,

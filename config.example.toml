@@ -8,6 +8,10 @@ project_url = "https://github.com/orgs/EXAMPLE-ORG/projects/0"
 ids_file = "project-board-ids.json"
 # The converter's own config discovery walks up the parent directories
 # from wherever it is run, so these are passed explicitly as --metadata /
-# --persons rather than left for teille-douce to find on its own.
+# --persons / --entities rather than left for teille-douce to find on its
+# own — a TDOUCE_ENTITIES_DIR or a paths.entities in some parent's TOML
+# would otherwise silently relocate the NER entity CSVs teille-sync is
+# supposed to publish.
 metadata_csv = "metadata_livre.csv"     # catalogue of volumes
 persons_csv = "metadata_personne.csv"   # catalogue of persons
+entities_dir = "entities"               # where the converter writes NER entity CSVs

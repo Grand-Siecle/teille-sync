@@ -125,13 +125,41 @@ def test_run_converter_passes_metadata_and_persons_flags(monkeypatch):
     monkeypatch.setattr(teille_sync.convert.subprocess, "run", mock_run)
 
     run_converter(["LIV0001_reconciled"], "OCR", "tei_output",
-                  Path("cat/metadata_livre.csv"), Path("cat/metadata_personne.csv"))
+                  Path("cat/metadata_livre.csv"), Path("cat/metadata_personne.csv"),
+                  Path("cat/entities"))
 
     argv = seen["argv"]
     assert "--metadata" in argv
     assert argv[argv.index("--metadata") + 1] == "cat/metadata_livre.csv"
     assert "--persons" in argv
     assert argv[argv.index("--persons") + 1] == "cat/metadata_personne.csv"
+
+
+def test_run_converter_passes_the_entities_flag(monkeypatch):
+    """`--entities` closes the same config-discovery trap as `--metadata`/
+    `--persons`: without it, a `TDOUCE_ENTITIES_DIR` or a `paths.entities`
+    in some parent directory's TOML silently relocates the NER entity
+    CSVs, and a publish step looking in the wrong place skips them with
+    no complaint. This is the test that fails if `--entities` is ever
+    dropped from argv again."""
+    seen = {}
+
+    def mock_run(argv, **kwargs):
+        seen["argv"] = argv
+        result = MagicMock()
+        result.returncode = 0
+        return result
+
+    import teille_sync.convert
+    monkeypatch.setattr(teille_sync.convert.subprocess, "run", mock_run)
+
+    run_converter(["LIV0001_reconciled"], "OCR", "tei_output",
+                  Path("metadata_livre.csv"), Path("metadata_personne.csv"),
+                  Path("cat/entities"))
+
+    argv = seen["argv"]
+    assert "--entities" in argv
+    assert argv[argv.index("--entities") + 1] == "cat/entities"
 
 
 def test_run_converter_still_requires_all_phases_and_services(monkeypatch):
@@ -147,7 +175,8 @@ def test_run_converter_still_requires_all_phases_and_services(monkeypatch):
     monkeypatch.setattr(teille_sync.convert.subprocess, "run", mock_run)
 
     run_converter(["LIV0001_reconciled"], "OCR", "tei_output",
-                  Path("metadata_livre.csv"), Path("metadata_personne.csv"))
+                  Path("metadata_livre.csv"), Path("metadata_personne.csv"),
+                  Path("entities"))
 
     argv = seen["argv"]
     assert "--phases" in argv and argv[argv.index("--phases") + 1] == "all"
@@ -164,7 +193,8 @@ def test_run_converter_returns_the_childs_exit_code(monkeypatch):
     monkeypatch.setattr(teille_sync.convert.subprocess, "run", mock_run)
 
     code = run_converter(["LIV0001_reconciled"], "OCR", "tei_output",
-                         Path("metadata_livre.csv"), Path("metadata_personne.csv"))
+                         Path("metadata_livre.csv"), Path("metadata_personne.csv"),
+                         Path("entities"))
     assert code == 3
 
 

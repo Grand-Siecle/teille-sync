@@ -22,6 +22,7 @@ DEFAULTS = {
     "work_dir": Path("work"),
     "metadata_csv": Path("metadata_livre.csv"),
     "persons_csv": Path("metadata_personne.csv"),
+    "entities_dir": Path("entities"),
 }
 
 
@@ -57,6 +58,7 @@ CONVERTERS = {
     "project_url": str,
     "metadata_csv": Path,
     "persons_csv": Path,
+    "entities_dir": Path,
 }
 
 

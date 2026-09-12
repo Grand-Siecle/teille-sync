@@ -21,6 +21,7 @@ monkeypatched — the three that would otherwise open a socket or a
 subprocess.
 """
 
+import inspect
 import json
 import socket
 import zipfile
@@ -31,7 +32,7 @@ from pathlib import Path
 import pytest
 
 from teille_sync import batch, exits, nas
-from teille_sync.board import Card
+from teille_sync.board import Board, Card
 from teille_sync.names import pipeline_name
 from teille_sync.preflight import Check
 from teille_sync.settings import Settings
@@ -93,6 +94,17 @@ class FakeBoard:
             card, status=verdict.status, detail=verdict.detail)
 
 
+def test_fakeboard_matches_the_real_boards_interface():
+    """The one guard that keeps the double honest: if `Board` ever gains
+    or loses a parameter on any of these five methods, this fails before
+    any test that uses `FakeBoard` gets a chance to quietly stop meaning
+    what it looks like it means."""
+    for name in ("pending", "stale", "claim", "release", "write"):
+        fake_sig = inspect.signature(getattr(FakeBoard, name))
+        real_sig = inspect.signature(getattr(Board, name))
+        assert fake_sig == real_sig, f"{name} signature drifted from Board"
+
+
 def _cards(identifiers, status="À traiter", detail=""):
     return [Card(identifier=i, item_id=f"I_{i}", status=status, detail=detail)
            for i in identifiers]
@@ -121,6 +133,12 @@ def _settings(tmp_path, nas_root, **over):
         "work_dir": tmp_path / "work",
         "metadata_csv": tmp_path / "metadata_livre.csv",
         "persons_csv": tmp_path / "metadata_personne.csv",
+        # tmp_path-scoped, not a bare relative "entities": a batch must
+        # never read or write anywhere outside its own sandbox during a
+        # test, and this is also what closes the config-discovery hole
+        # (a TDOUCE_ENTITIES_DIR or a parent directory's TOML silently
+        # relocating the NER entity CSVs).
+        "entities_dir": tmp_path / "entities",
     }
     values.update(over)
     return Settings(values=values, origins={k: "default" for k in values},
@@ -138,7 +156,8 @@ def _passing_checks():
 
 
 def _stub_run_converter(manifest, incidents=(), exit_code=0, calls=None,
-                        pages_by_doc=None):
+                        pages_by_doc=None, entities_calls=None,
+                        run_stamp=RUN_STAMP):
     """Stands in for `convert.run_converter`: writes a real `run.json`
     (and `incidents.jsonl`, and a stub `.tei.xml` per document the
     manifest marks "ok") exactly where the real converter leaves them, so
@@ -147,13 +166,16 @@ def _stub_run_converter(manifest, incidents=(), exit_code=0, calls=None,
     code against real files rather than a second layer of mocks."""
     pages_by_doc = pages_by_doc or {}
 
-    def fake(docs, input_dir, output_dir, metadata_csv, persons_csv, plain=False):
+    def fake(docs, input_dir, output_dir, metadata_csv, persons_csv,
+            entities_dir, plain=False):
         if calls is not None:
             calls.append(list(docs))
+        if entities_calls is not None:
+            entities_calls.append(entities_dir)
         if exit_code == 3:
             return 3
         output_dir = Path(output_dir)
-        run_dir = output_dir / ".teille-douce" / "runs" / RUN_STAMP
+        run_dir = output_dir / ".teille-douce" / "runs" / run_stamp
         run_dir.mkdir(parents=True, exist_ok=True)
         (run_dir / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
         if incidents:
@@ -166,6 +188,21 @@ def _stub_run_converter(manifest, incidents=(), exit_code=0, calls=None,
                 surfaces = "".join(f"<surface>{i}</surface>" for i in range(n))
                 (output_dir / f"{doc}.tei.xml").write_text(
                     f"<TEI>{surfaces}</TEI>", encoding="utf-8")
+        return exit_code
+    return fake
+
+
+def _stub_crashed_converter(exit_code, calls=None):
+    """A converter killed before it could write anything at all — an OOM,
+    say. Unlike `_stub_run_converter` with a non-3 exit code, this leaves
+    `output_dir` exactly as it found it: no new run directory, no new
+    `.tei.xml`. Used to prove `run_batch` does not mistake whatever run
+    directory was already there for this batch's own record."""
+
+    def fake(docs, input_dir, output_dir, metadata_csv, persons_csv,
+            entities_dir, plain=False):
+        if calls is not None:
+            calls.append(list(docs))
         return exit_code
     return fake
 
@@ -185,10 +222,11 @@ def _stub_validate(invalid=None):
 
 
 def _patch_common(monkeypatch, manifest, incidents=(), exit_code=0,
-                  invalid=None, calls=None, pages_by_doc=None):
+                  invalid=None, calls=None, pages_by_doc=None,
+                  entities_calls=None):
     monkeypatch.setattr(batch, "preflight", lambda settings: _passing_checks())
     monkeypatch.setattr(batch, "run_converter", _stub_run_converter(
-        manifest, incidents, exit_code, calls, pages_by_doc))
+        manifest, incidents, exit_code, calls, pages_by_doc, entities_calls))
     monkeypatch.setattr(batch, "validate", _stub_validate(invalid))
 
 
@@ -332,6 +370,31 @@ def test_run_converter_is_skipped_when_every_claimed_document_is_blocked(
     assert all(v.status == "Bloqué" for v in result.outcomes.values())
 
 
+def test_a_truncated_copy_carries_its_real_reason_not_just_absent(tmp_path, monkeypatch):
+    """`decide()` always writes the same generic "the archive was never
+    fetched" for a Bloqué card, no matter why. A copy truncated by a
+    dropped VPN and a genuinely absent archive are different failures —
+    the real reason from `nas.fetch()` must still reach the board, or an
+    operator reading "Absent du NAS" would go looking on the share for an
+    archive that was there all along."""
+    identifiers = ["LIV0001"]
+    root = _share(tmp_path, identifiers)
+    _patch_common(monkeypatch, {"documents": {}})
+
+    def short_copy(src, dst):
+        Path(dst).write_bytes(Path(src).read_bytes()[:5])
+
+    monkeypatch.setattr("teille_sync.nas.shutil.copyfile", short_copy)
+    board = FakeBoard(_cards(identifiers))
+
+    result = batch.run_batch(_settings(tmp_path, root, batch_size=1), board, NOW)
+
+    outcome = result.outcomes["LIV0001"]
+    assert outcome.status == "Bloqué"
+    assert outcome.cause == "Absent du NAS"   # verdict.py's own label is kept
+    assert "dropped" in outcome.detail or "size" in outcome.detail
+
+
 # -- Rule 3: KeyboardInterrupt ------------------------------------------------
 
 def test_an_interrupt_releases_every_claimed_but_unconverted_card(
@@ -383,6 +446,36 @@ def test_an_interrupt_during_claiming_releases_the_cards_already_claimed(
     assert sorted(board.release_calls) == sorted(identifiers[:2])
 
 
+def test_an_interrupt_during_board_write_does_not_release_already_judged_cards(
+        tmp_path, monkeypatch):
+    """The `judged` filter's only real job: by the time `board.write()` is
+    called for any card, `verdict.decide()` has already run for *all*
+    five (judging is one loop, over the whole batch, that completes
+    before the write loop starts). An interrupt here must not flip cards
+    that already have a computed verdict back to `À traiter` — including
+    the one or two that may already have been written and published
+    successfully before the interrupt landed. Without the filter (release
+    every claimed card unconditionally), this fails: all 5 would be
+    released even though all 5 were already judged."""
+    identifiers = _five()
+    root = _share(tmp_path, identifiers)
+    _patch_common(monkeypatch, ALL_OK)
+    board = FakeBoard(_cards(identifiers))
+    real_write = board.write
+
+    def interrupting_write(card, verdict, pages, version, now):
+        if card.identifier == identifiers[2]:
+            raise KeyboardInterrupt()
+        return real_write(card, verdict, pages, version, now)
+
+    board.write = interrupting_write
+
+    with pytest.raises(KeyboardInterrupt):
+        batch.run_batch(_settings(tmp_path, root), board, NOW)
+
+    assert board.release_calls == []
+
+
 # -- Rule 2: converter exit code 3 -------------------------------------------
 
 def test_require_services_refusing_releases_every_claim(tmp_path, monkeypatch):
@@ -425,6 +518,74 @@ def test_a_released_batch_reports_what_was_claimed_not_silence(tmp_path, monkeyp
     assert result.message != ""
 
 
+# -- A converter that crashes without leaving a run record --------------------
+
+def test_a_crashed_converter_is_not_judged_against_the_previous_batchs_manifest(
+        tmp_path, monkeypatch):
+    """`output_dir` persists across batches. If a converter is killed
+    (SIGKILL/OOM) before it can write `run.json`, `latest_run(output_dir)`
+    still finds whatever the *previous* batch left there. Judging this
+    batch's documents against that stale manifest would credit or blame
+    them for someone else's run — possibly reading `Terminé` for
+    documents this batch's converter never touched, and (with
+    `--republish`) re-publishing the stale TEI file still sitting in
+    `output_dir` under a fresh-looking card."""
+    identifiers = _five()
+    root = _share(tmp_path, identifiers)
+    monkeypatch.setattr(batch, "preflight", lambda settings: _passing_checks())
+
+    settings = _settings(tmp_path, root)
+    output_dir = Path(settings.work_dir) / "tei_output"
+    stale_run = output_dir / ".teille-douce" / "runs" / "20260101-000000-0000001"
+    stale_run.mkdir(parents=True)
+    stale_manifest = {"documents": {pipeline_name(i): "ok" for i in identifiers}}
+    (stale_run / "run.json").write_text(json.dumps(stale_manifest), encoding="utf-8")
+    for i in identifiers:
+        (output_dir / f"{pipeline_name(i)}.tei.xml").write_text(
+            "<TEI><surface>x</surface></TEI>", encoding="utf-8")
+
+    monkeypatch.setattr(batch, "run_converter", _stub_crashed_converter(137))
+
+    def must_not_be_called(*a, **k):
+        raise AssertionError("validate() must not run against a stale run record")
+
+    monkeypatch.setattr(batch, "validate", must_not_be_called)
+    board = FakeBoard(_cards(identifiers))
+
+    result = batch.run_batch(settings, board, NOW)
+
+    assert all(v.status == "Bloqué" for v in result.outcomes.values()), (
+        "every document must judge as if nothing converted, not as the "
+        "stale manifest's \"ok\""
+    )
+    assert "137" in result.message or "no run record" in result.message
+
+
+def test_a_nonzero_exit_that_still_left_a_fresh_manifest_is_noted_in_the_message(
+        tmp_path, monkeypatch):
+    """Exit code 3 is special-cased (release, don't judge). Every other
+    non-zero code was previously discarded entirely — silently lost, even
+    though the converter is telling the caller something. When a fresh
+    run record *was* left (unlike the crash case above), the batch should
+    still judge normally from it, but the non-zero code must reach
+    `result.message` rather than vanish."""
+    identifiers = _five()
+    root = _share(tmp_path, identifiers)
+    manifest = {"documents": {pipeline_name(i): "ok" for i in identifiers}}
+    manifest["documents"][pipeline_name(identifiers[0])] = "failed"
+    incidents = [{"code": "document_failed", "document": pipeline_name(identifiers[0]),
+                 "step": "sourcedoc", "count": 1, "total": 1, "detail": "boom"}]
+    _patch_common(monkeypatch, manifest, incidents=incidents, exit_code=1)
+    board = FakeBoard(_cards(identifiers))
+
+    result = batch.run_batch(_settings(tmp_path, root), board, NOW)
+
+    assert "1" in result.message
+    # judging still happened normally against the (fresh) manifest
+    assert result.outcomes[identifiers[0]].status == "Échec"
+    assert result.outcomes[identifiers[1]].status == "Terminé"
+
+
 # -- Rule 1: publish before the final status write ---------------------------
 
 def test_a_publication_refused_keeps_the_status_and_says_so_in_the_detail(
@@ -450,31 +611,33 @@ def test_a_publication_refused_keeps_the_status_and_says_so_in_the_detail(
 
 
 def test_publication_happens_before_the_final_status_write(tmp_path, monkeypatch):
+    """Publishes and board writes must land in ONE shared, ordered log —
+    two separately-built lists checked only for membership and length
+    would pass even if `run_batch` wrote to the board before publishing:
+    both lists would still hold the same 5 identifiers, at the same
+    length, regardless of which happened first. Only comparing each
+    identifier's own position in a single timeline pins the order."""
     identifiers = _five()
     root = _share(tmp_path, identifiers)
     _patch_common(monkeypatch, ALL_OK)
     board = FakeBoard(_cards(identifiers))
-    order = []
     real_publish = nas.publish
 
     def recording_publish(*a, **k):
-        order.append(("publish", a[3]))  # identifier is the 4th positional arg
+        board.calls_in_order.append(("publish", a[3]))  # 4th positional = identifier
         return real_publish(*a, **k)
 
     monkeypatch.setattr(batch.nas, "publish", recording_publish)
-    order_ref = board.calls_in_order
 
     batch.run_batch(_settings(tmp_path, root), board, NOW)
 
-    # every publish for a given identifier precedes that identifier's write
-    write_index = {i: idx for idx, (kind, i) in enumerate(order_ref) if kind == "write"}
-    publish_docs = {i for _, i in order}
-    for ident in publish_docs:
-        assert ident in write_index, "a published document must still be written"
-    # cross-check using the shared timeline: publish list built before
-    # run_batch touched the board at all for writes
-    assert len(order) == 5
-    assert len(write_index) == 5
+    log = board.calls_in_order
+    for ident in identifiers:
+        publish_at = log.index(("publish", ident))
+        write_at = log.index(("write", ident))
+        assert publish_at < write_at, (
+            f"{ident} was written to the board before it was published "
+            f"(log: {log})")
 
 
 def test_review_documents_are_published_to_the_review_folder(tmp_path, monkeypatch):
@@ -541,7 +704,11 @@ def test_a_failed_document_keeps_its_local_sources(tmp_path, monkeypatch):
 
     batch.run_batch(settings, board, NOW)
 
-    archive = Path(settings.work_dir) / "OCR" / f"{identifiers[0]}_reconciled.zip"
+    # Derived the same way `_delete_local_source` derives it (via
+    # `pipeline_name`), not a hand-written "_reconciled" literal: a
+    # change to that naming would otherwise silently stop this test from
+    # checking the file cleanup actually touches, while still passing.
+    archive = Path(settings.work_dir) / "OCR" / f"{pipeline_name(identifiers[0])}.zip"
     assert archive.exists(), "a failed document's archive must survive for reproduction"
 
 
@@ -556,7 +723,7 @@ def test_a_finished_document_has_its_sources_deleted(tmp_path, monkeypatch):
 
     assert all(v.status == "Terminé" for v in result.outcomes.values())
     for ident in identifiers:
-        archive = Path(settings.work_dir) / "OCR" / f"{ident}_reconciled.zip"
+        archive = Path(settings.work_dir) / "OCR" / f"{pipeline_name(ident)}.zip"
         assert not archive.exists(), f"{ident}'s local archive should be cleaned up"
 
 
@@ -574,7 +741,7 @@ def test_keep_disables_deletion_for_everything(tmp_path, monkeypatch):
     batch.run_batch(settings, board, NOW, keep=True)
 
     for ident in identifiers:
-        archive = Path(settings.work_dir) / "OCR" / f"{ident}_reconciled.zip"
+        archive = Path(settings.work_dir) / "OCR" / f"{pipeline_name(ident)}.zip"
         assert archive.exists(), f"--keep must leave {ident}'s archive alone"
 
 
@@ -586,12 +753,20 @@ def test_stale_claims_older_than_reclaim_after_are_taken_back(tmp_path, monkeypa
     _patch_common(monkeypatch, ALL_OK)
     stale_one = identifiers[0]
     cards = _cards(identifiers)
+    # The stale card must start genuinely `En cours` (claimed by some
+    # other, now-dead machine) rather than already `À traiter` — a card
+    # already back at `À traiter` makes reclaiming it a no-op this test
+    # cannot tell apart from doing nothing at all.
+    cards = [replace(c, status="En cours", detail="ghost-machine · 2026-09-01T00:00:00")
+            if c.identifier == stale_one else c for c in cards]
     board = FakeBoard(cards, stale_identifiers=[stale_one])
 
-    batch.run_batch(_settings(tmp_path, root), board, NOW)
+    result = batch.run_batch(_settings(tmp_path, root), board, NOW)
 
     assert board.stale_called == 1
     assert stale_one in board.release_calls
+    # release() must put it back where select()/claim() can find it again
+    assert stale_one in result.claimed
 
 
 # -- Exit codes ---------------------------------------------------------------
@@ -690,6 +865,46 @@ def test_version_pipeline_is_read_from_the_converter_preflight_check(
     batch.run_batch(_settings(tmp_path, root, batch_size=1), board, NOW)
 
     assert board.write_calls[0]["version"] == "teille-douce 2.1.0"
+
+
+# -- Entities directory ---------------------------------------------------------
+#
+# `run_converter()`'s own config discovery walks up parent directories the
+# same way `metadata_csv`/`persons_csv` do — a `TDOUCE_ENTITIES_DIR` or a
+# `paths.entities` found on that walk would silently relocate the NER
+# entity CSVs, and `nas.publish()` skips a missing entities directory
+# without complaint. `settings.entities_dir` and an explicit `--entities`
+# close that hole exactly like `--metadata`/`--persons` do.
+
+def test_the_configured_entities_dir_reaches_run_converter(tmp_path, monkeypatch):
+    identifiers = ["LIV0001"]
+    root = _share(tmp_path, identifiers)
+    entities_calls = []
+    _patch_common(monkeypatch, {"documents": {pipeline_name("LIV0001"): "ok"}},
+                  entities_calls=entities_calls)
+    settings = _settings(tmp_path, root, batch_size=1)
+    board = FakeBoard(_cards(identifiers))
+
+    batch.run_batch(settings, board, NOW)
+
+    assert entities_calls == [settings.entities_dir]
+
+
+def test_entities_are_published_using_the_configured_entities_dir(tmp_path, monkeypatch):
+    identifiers = ["LIV0001"]
+    root = _share(tmp_path, identifiers)
+    _patch_common(monkeypatch, {"documents": {pipeline_name("LIV0001"): "ok"}})
+    settings = _settings(tmp_path, root, batch_size=1)
+    # Simulate the converter having written entities exactly where
+    # `settings.entities_dir` says to look.
+    ents = Path(settings.entities_dir) / pipeline_name("LIV0001")
+    ents.mkdir(parents=True)
+    (ents / "entities_persons.csv").write_text("id;name\n", encoding="utf-8")
+    board = FakeBoard(_cards(identifiers))
+
+    batch.run_batch(settings, board, NOW)
+
+    assert (nas.tei_dir(root) / "entities" / "LIV0001" / "entities_persons.csv").exists()
 
 
 # -- Machine name --------------------------------------------------------------
