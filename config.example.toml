@@ -1,0 +1,8 @@
+# Copy to config.local.toml and put your own values in.
+# config.local.toml is gitignored: the real address never lands here.
+nas_root = "/mnt/example"          # Y:\  ·  /mnt/y  ·  /Volumes/Example
+nas_host = "nas.example.invalid"   # the host the VPN check dials
+batch_size = 5
+reclaim_after = "6h"
+project_url = "https://github.com/orgs/EXAMPLE-ORG/projects/0"
+ids_file = "project-board-ids.json"
