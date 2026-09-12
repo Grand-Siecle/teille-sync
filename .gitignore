@@ -8,3 +8,6 @@ work/
 .coverage*
 build/
 dist/
+
+# la spec et le plan restent sur le disque, pas sur le remote
+docs/
