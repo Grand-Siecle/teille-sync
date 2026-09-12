@@ -84,6 +84,9 @@ def run_converter(docs, input_dir, output_dir, plain=False):
 def validate(output_dir, docs):
     """`teille-douce validate --json`, reduced to one verdict per document.
 
+    Validates only the files for documents in the `docs` batch.
+    If no document files exist, returns {} without invoking the validator.
+
     The shape, confirmed against the running CLI rather than guessed:
 
         {"applied": ["python invariants", "teille-douce.rng", "…svrl.xsl"],
@@ -97,9 +100,21 @@ def validate(output_dir, docs):
     is empty. Errors are plain strings. The command exits 1 when anything
     failed and 0 when everything passed.
     """
-    proc = subprocess.run(
-        ["teille-douce", "validate", str(output_dir), "--json"],
-        capture_output=True, text=True, check=False)
+    output_dir = Path(output_dir)
+
+    # Build list of file paths that actually exist
+    file_paths = []
+    for doc in docs:
+        path = output_dir / f"{doc}.tei.xml"
+        if path.exists():
+            file_paths.append(str(path))
+
+    # If no files exist, nothing to validate
+    if not file_paths:
+        return {}
+
+    argv = ["teille-douce", "validate"] + file_paths + ["--json"]
+    proc = subprocess.run(argv, capture_output=True, text=True, check=False)
     try:
         report = json.loads(proc.stdout)
     except json.JSONDecodeError:
