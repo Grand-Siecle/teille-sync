@@ -45,16 +45,26 @@ RUN_STAMP = "20260912-100000-0000001"
 
 # -- fakes ------------------------------------------------------------------
 
+class BoardBoom(Exception):
+    """What a GraphQL transport raises when GitHub says no — the shape of
+    `cli.BoardTransportError`, without the import cycle."""
+
 class FakeBoard:
     """`board.Board`'s five public methods, backed by a dict instead of a
     GraphQL transport. `identifiers_stale` marks which cards `stale()`
     should return; `losers` marks which cards must lose their `claim()`
     race. Every call is recorded so tests can assert on order and count."""
 
-    def __init__(self, cards, losers=(), stale_identifiers=()):
+    def __init__(self, cards, losers=(), stale_identifiers=(),
+                 write_failures=()):
         self.cards = {c.identifier: c for c in cards}
         self.losers = set(losers)
         self.stale_identifiers = set(stale_identifiers)
+        # Identifiers whose `write()` raises, standing in for
+        # `cli.BoardTransportError` — which batch.py cannot import (cli
+        # imports batch), and does not need to: the transport is a
+        # caller-supplied callable and may raise anything at all.
+        self.write_failures = set(write_failures)
         self.claim_calls = []
         self.release_calls = []
         self.write_calls = []
@@ -87,6 +97,8 @@ class FakeBoard:
         self.cards[card.identifier] = replace(card, status="À traiter", detail="")
 
     def write(self, card, verdict, pages, version, now):
+        if card.identifier in self.write_failures:
+            raise BoardBoom(f"the board did not answer for {card.identifier}")
         self.write_calls.append(
             {"identifier": card.identifier, "verdict": verdict,
              "pages": pages, "version": version})
@@ -527,6 +539,72 @@ def test_an_empty_but_present_archives_folder_is_not_a_vanished_share(
 
     assert board.release_calls == []
     assert all(v.status == "Bloqué" for v in result.outcomes.values())
+
+
+# -- a board write that fails must not abort the batch ------------------------
+#
+# The write loop runs *after* publication. An exception there — a GitHub
+# error, a stale id file — left the TEI on the share, the card `En cours`,
+# nothing released, and a traceback out of `main()` with exit 1, which this
+# project defines as "some documents failed". A partial board state the
+# operator is told about is recoverable; a traceback after five
+# publications is not.
+
+def test_one_board_write_that_fails_does_not_stop_the_other_four(
+        tmp_path, monkeypatch):
+    identifiers = _five()
+    root = _share(tmp_path, identifiers)
+    _patch_common(monkeypatch, ALL_OK)
+    board = FakeBoard(_cards(identifiers), write_failures=["LIV0003"])
+
+    result = batch.run_batch(_settings(tmp_path, root), board, NOW)
+
+    written = [c["identifier"] for c in board.write_calls]
+    assert sorted(written) == sorted(i for i in identifiers if i != "LIV0003")
+    assert result.exit_code != exits.OK
+
+
+def test_a_failed_board_write_is_named_and_says_the_card_needs_attention(
+        tmp_path, monkeypatch):
+    identifiers = _five()
+    root = _share(tmp_path, identifiers)
+    _patch_common(monkeypatch, ALL_OK)
+    board = FakeBoard(_cards(identifiers), write_failures=["LIV0003"])
+
+    result = batch.run_batch(_settings(tmp_path, root), board, NOW)
+
+    assert "LIV0003" in result.unwritten
+    assert "LIV0003" in result.message
+    assert "attention" in result.message
+    # It was published: that is exactly why the card matters.
+    assert result.published["LIV0003"] is True
+
+
+def test_a_batch_whose_every_write_failed_still_returns_a_result(
+        tmp_path, monkeypatch):
+    identifiers = _five()
+    root = _share(tmp_path, identifiers)
+    _patch_common(monkeypatch, ALL_OK)
+    board = FakeBoard(_cards(identifiers), write_failures=identifiers)
+
+    result = batch.run_batch(_settings(tmp_path, root), board, NOW)
+
+    assert sorted(result.unwritten) == sorted(identifiers)
+    assert result.exit_code == exits.SOME_FAILED
+    assert len(result.outcomes) == 5, "the verdicts were still computed"
+
+
+def test_a_batch_with_every_write_landing_reports_none_unwritten(
+        tmp_path, monkeypatch):
+    identifiers = _five()
+    root = _share(tmp_path, identifiers)
+    _patch_common(monkeypatch, ALL_OK)
+    board = FakeBoard(_cards(identifiers))
+
+    result = batch.run_batch(_settings(tmp_path, root), board, NOW)
+
+    assert result.unwritten == {}
+    assert result.exit_code == exits.OK
 
 
 # -- Rule 3: KeyboardInterrupt ------------------------------------------------

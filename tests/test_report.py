@@ -142,6 +142,23 @@ def test_batch_summary_reports_outcome_counts_when_present():
     assert "1 Échec" in text
 
 
+def test_batch_summary_names_every_card_the_board_refused():
+    """A document published to the share whose card was never written is
+    the one loss only a person can close. It is named, not counted."""
+    result = _result({"LIV0044": Verdict("Terminé")}, {"LIV0044": True},
+                     claimed=["LIV0044"],
+                     unwritten={"LIV0044": "the board did not answer"},
+                     message="the board refused 1 verdict(s) (LIV0044)")
+    text = str(report.batch_summary(result))
+    assert "unwritten 1" in text
+    assert "LIV0044" in text
+
+
+def test_batch_summary_says_zero_unwritten_when_every_card_landed():
+    text = str(report.batch_summary(_result(claimed=["LIV0001"])))
+    assert "unwritten 0" in text
+
+
 # -- dry_run_table -------------------------------------------------------
 
 def test_dry_run_table_lists_the_candidate_identifiers_in_order():

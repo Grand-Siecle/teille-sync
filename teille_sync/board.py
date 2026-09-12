@@ -140,8 +140,16 @@ class Board:
         self._set(card.item_id, "Détail", {"text": ""})
 
     def write(self, card, verdict, pages, version, now):
-        if card.identifier not in self.ids.get("items", {}):
-            raise KeyError(f"{card.identifier} has no card on the board")
+        """Every field one verdict carries, onto one card.
+
+        No check that `card.identifier` is in the id file's `items`:
+        `card.item_id` — the thing that actually addresses these writes
+        — comes from the live `pending()` query, not from that file, so
+        the check guarded nothing and refused a card added to the board
+        since the last `ids refresh`. It refused it here, after the
+        document had converted and been published, leaving the card `En
+        cours` and the batch dead.
+        """
         self._select(card.item_id, "Status", verdict.status, required=True)
         self._select(card.item_id, "Cause", verdict.cause)
         self._select(card.item_id, "Phase", verdict.phase)

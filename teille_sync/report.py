@@ -9,7 +9,8 @@ is what makes every function below testable by inspecting the renderable
 it returns rather than capturing a terminal.
 
 **A batch that lost documents must say so in words.** `batch_summary()`
-always names `claimed`, `reclaimed` and `released`, and `batch_table()`
+always names `claimed`, `reclaimed`, `released` and `unwritten`, and
+`batch_table()`
 leaves a caption on an empty table rather than rendering a bare header —
 so a batch that claimed five cards and had to hand all five back (a dead
 service, an interrupt) never looks, on screen, like a batch that found
@@ -77,7 +78,7 @@ def batch_table(result):
 def batch_summary(result):
     """The closing block: what was claimed, reclaimed and released, and
     the batch's own `message` — the words behind an empty `batch_table`,
-    when there is one. Always mentions all three counts, even at zero,
+    when there is one. Always mentions all four counts, even at zero,
     so a batch that genuinely found nothing pending reads differently
     from one that claimed five and lost all five."""
     parts = [
@@ -87,6 +88,13 @@ def batch_summary(result):
         (f" ({', '.join(result.reclaimed)})" if result.reclaimed else ""),
         f"released {len(result.released)}" +
         (f" ({', '.join(result.released)})" if result.released else ""),
+        # Named, never merely counted: a card the board refused belongs
+        # to a document that is already on the share, and only a person
+        # can close the gap. Shown at zero like the other three, so a
+        # batch where every verdict landed reads differently from one
+        # where five did not.
+        f"unwritten {len(result.unwritten)}" +
+        (f" ({', '.join(sorted(result.unwritten))})" if result.unwritten else ""),
     ]
     counts = Counter(v.status for v in result.outcomes.values())
     if counts:

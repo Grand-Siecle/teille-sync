@@ -18,7 +18,7 @@ import pytest
 
 from teille_sync import cli, exits
 from teille_sync.batch import BatchResult
-from teille_sync.board import TODO, WIP, Board, Card
+from teille_sync.board import TODO, WIP, Board, Card, StaleIdFile
 from teille_sync.preflight import Check
 from teille_sync.settings import Settings
 from teille_sync.verdict import DONE
@@ -389,6 +389,58 @@ def test_keyboard_interrupt_out_of_run_batch_exits_130(monkeypatch, tmp_path):
 # -v and -q only ever change how much chatter is on screen — never
 # whether a fact the operator needs (a loss, a failure, a released
 # claim) is visible at all.
+
+# -- main() never raises: the two exceptions that used to escape it -----------
+
+def test_a_board_transport_error_leaves_by_the_front_door(monkeypatch, tmp_path):
+    """`main()`'s docstring says it never raises; it caught only
+    `SystemExit` and `KeyboardInterrupt`. `_http_transport` raises
+    `BoardTransportError` on any GitHub error, and the write loop runs
+    *after* publication — so a board that went down mid-batch ended the
+    run with a traceback and exit 1, which this project defines as "some
+    documents failed"."""
+    _stub_settings(monkeypatch, _settings(tmp_path))
+    monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
+    monkeypatch.setattr(cli, "now_fn", lambda: NOW)
+
+    def transport_died(settings, board, now, republish, keep):
+        raise cli.BoardTransportError("the board did not answer: 502")
+
+    monkeypatch.setattr(cli, "run_batch", transport_died)
+
+    code = cli.main(["run"])
+
+    assert code == exits.MISCONFIGURED
+
+
+def test_a_board_transport_error_says_what_went_wrong(monkeypatch, tmp_path,
+                                                      capsys):
+    _stub_settings(monkeypatch, _settings(tmp_path))
+    monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
+    monkeypatch.setattr(cli, "now_fn", lambda: NOW)
+    monkeypatch.setattr(cli, "run_batch", lambda *a, **k: (_ for _ in ()).throw(
+        cli.BoardTransportError("the board did not answer: 502")))
+
+    cli.main(["run"])
+
+    assert "502" in capsys.readouterr().err
+
+
+def test_a_stale_id_file_mid_run_is_a_refusal_not_a_traceback(monkeypatch,
+                                                              tmp_path):
+    """`claim()` and `write()` raise `StaleIdFile` for a Status option the
+    board no longer has. That is exit 3 — the id file has to be rebuilt —
+    not a stack trace."""
+    _stub_settings(monkeypatch, _settings(tmp_path))
+    monkeypatch.setattr(cli, "_open_board", lambda s: FakeBoard())
+    monkeypatch.setattr(cli, "now_fn", lambda: NOW)
+    monkeypatch.setattr(cli, "run_batch", lambda *a, **k: (_ for _ in ()).throw(
+        StaleIdFile("the board's Status field has no option named 'En cours'")))
+
+    code = cli.main(["run"])
+
+    assert code == exits.MISCONFIGURED
+
 
 def test_verbose_and_quiet_together_is_a_usage_error():
     assert cli.main(["run", "-v", "-q"]) == exits.USAGE

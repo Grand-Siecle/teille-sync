@@ -8,9 +8,10 @@ which only unpacks it), builds a renderable via `report.py`, and prints it
 through the one `Console` `main()` constructed.
 
 `main(argv=None) -> int` never raises: an argparse usage error, a
-`SettingsError`, an `exits.refuse()` call and a `KeyboardInterrupt` are
-all caught here and turned into the exit code they mean, so a caller never
-has to `except SystemExit` to learn what happened.
+`SettingsError`, an `exits.refuse()` call, a `KeyboardInterrupt`, and the
+two the board itself raises — `BoardTransportError` and `StaleIdFile` —
+are all caught here and turned into the exit code they mean, so a caller
+never has to `except SystemExit` to learn what happened.
 """
 
 import argparse
@@ -26,7 +27,7 @@ from rich.console import Console
 
 from teille_sync import exits, report
 from teille_sync.batch import run_batch
-from teille_sync.board import Board
+from teille_sync.board import Board, StaleIdFile
 from teille_sync.preflight import preflight
 from teille_sync.settings import SettingsError, resolve
 
@@ -424,6 +425,17 @@ def main(argv=None):
     try:
         args = parser.parse_args(argv)
         return _dispatch(args)
+    except (BoardTransportError, StaleIdFile) as why:
+        # The two the docstring above promised and the code did not
+        # deliver. `_http_transport` raises `BoardTransportError` on any
+        # GitHub error and `board.py` raises `StaleIdFile` for a field or
+        # a Status option the board no longer has — either can surface
+        # from a `pending()`, a `claim()` or a `release()` deep inside a
+        # batch. Both mean the board cannot be trusted right now, which
+        # is exit 3; a traceback would report it as exit 1, "some
+        # documents failed", and blame the corpus.
+        print(f"teille-sync: {why}", file=sys.stderr)
+        return exits.MISCONFIGURED
     except SystemExit as exc:
         code = exc.code
         if isinstance(code, int):

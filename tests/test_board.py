@@ -193,11 +193,25 @@ def test_release_puts_the_card_back_and_clears_the_claim():
     assert t.calls[1][1]["value"] == {"text": ""}
 
 
-def test_an_unknown_identifier_is_refused_rather_than_written_nowhere():
-    board = Board(IDS, Recorder([]))
-    with pytest.raises(KeyError):
-        board.write(Card("LIV9999", "I_missing", "En cours", ""),
-                    Verdict("Terminé"), pages=1, version="v", now=NOW)
+def test_a_card_added_since_the_last_ids_refresh_is_still_written():
+    """`write()` used to refuse any identifier absent from `ids["items"]`.
+    The guard never guarded anything: `card.item_id` comes from the live
+    `pending()` query, not from the id file, so a card added to the board
+    since the last `ids refresh` converts fine and then blew the batch up
+    on a check that was never load-bearing — after publication, with the
+    card still `En cours`. The item id is what addresses the write, and
+    it is live."""
+    card = Card(identifier="LIV9999", item_id="I_new", status="En cours",
+                detail="thinkpad · 2026-09-12T14:30:00")
+    t = Recorder([{}] * 8)
+    board = Board(IDS, t)
+
+    board.write(card, Verdict("Terminé"), pages=7, version="v", now=NOW)
+
+    # Six, not eight: a `Terminé` verdict carries no Cause and no Phase.
+    assert len(t.calls) == 6
+    assert all(variables["i"] == "I_new" for _, variables in t.calls)
+    assert {"singleSelectOptionId": "o_done"} in [v.get("value") for _, v in t.calls]
 
 
 def test_write_raises_when_the_board_has_no_field_for_something_it_must_write():

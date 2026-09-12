@@ -88,6 +88,12 @@ class BatchResult:
     nothing to do: an empty `outcomes` dict means two very different
     things depending on whether `claimed` is also empty.
 
+    `unwritten` is the batch's last loss: a document whose verdict the
+    board refused. The write loop runs after publication, so a card left
+    unwritten describes a document that is on the share and whose card
+    still reads `En cours` — a state only a person can close, and one
+    that must therefore be named rather than counted.
+
     `checks` carries this call's own `preflight()` result (passing or
     failing) so a caller running several batches in a row — Task 8's
     `cli.py`, under `--batches`/`--until-done` — can display what this
@@ -98,6 +104,7 @@ class BatchResult:
     """
     outcomes: dict = field(default_factory=dict)
     published: dict = field(default_factory=dict)
+    unwritten: dict = field(default_factory=dict)
     exit_code: int = exits.OK
     claimed: list = field(default_factory=list)
     reclaimed: list = field(default_factory=list)
@@ -363,10 +370,32 @@ def run_batch(settings, board, now, republish=False, keep=False):
         result.published = published
 
         # -- 7a. Write every verdict to the board -----------------------------
+        # A write that fails here must not abort what is left: the
+        # documents are already published, and the loop is the only
+        # thing that can still move their cards off `En cours`. One
+        # broken write used to end the batch with a traceback, four
+        # verdicts never written and nothing said about any of them.
+        # `Exception` and not a named class: the transport is a
+        # caller-supplied callable (`cli._http_transport` raises
+        # `BoardTransportError`, which batch.py cannot import), and
+        # `board.py` itself raises `StaleIdFile`.
         version = _pipeline_version(checks)
         for card in claimed:
             pages = _pages_for(card.identifier, output_dir, fetched_path[card.identifier])
-            board.write(card, outcomes[card.identifier], pages, version, now)
+            try:
+                board.write(card, outcomes[card.identifier], pages, version, now)
+            except Exception as why:            # noqa: BLE001 - see above
+                result.unwritten[card.identifier] = (
+                    str(why) or why.__class__.__name__)
+
+        if result.unwritten:
+            named = ", ".join(sorted(result.unwritten))
+            note = (f"the board refused {len(result.unwritten)} verdict(s) "
+                    f"({named}) — those documents converted, and any that "
+                    f"reached the share are published, but their cards still "
+                    f"read `En cours`: they need attention by hand")
+            result.message = f"{result.message}; {note}" if result.message else note
+            result.exit_code = max(result.exit_code, exits.SOME_FAILED)
 
         # -- 7b. Clean up: keep the failures, delete the finished --------------
         if not keep:
