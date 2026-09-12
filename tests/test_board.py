@@ -104,6 +104,85 @@ def test_write_skips_a_phase_the_board_has_no_option_for():
     assert all(variables.get("f") != "F_phase" for _, variables in t.calls)
 
 
+# -- a missing Status option is fatal, a missing Phase/Cause option is not --
+#
+# Skipping stays right for Phase and Cause: the pipeline legitimately emits
+# steps and codes the board never modelled, and inventing an option would be
+# a guess. Status is the opposite. `claim()` skipping `En cours` left the
+# card reading `À traiter` while it was being converted — so a second
+# machine claims the same document, which is the one thing claiming exists
+# to prevent. And `write()` skipping the final status left the card `En
+# cours` carrying a verdict in `Détail` that `_claim_age` cannot parse: a
+# card nothing ever reclaims.
+
+def _without_status_option(label):
+    """The test ids, minus one Status option — a board whose option was
+    renamed in the UI since the last `ids refresh`."""
+    options = {name: oid for name, oid in IDS["fields"]["Status"]["options"].items()
+               if name != label}
+    fields = dict(IDS["fields"])
+    fields["Status"] = {**IDS["fields"]["Status"], "options": options}
+    return {**IDS, "fields": fields}
+
+
+def test_claim_raises_rather_than_leave_a_card_reading_a_traiter():
+    card = Card(identifier="LIV0001", item_id="I_1", status="À traiter", detail="")
+    t = Recorder([{}] * 3)
+    board = Board(_without_status_option("En cours"), t)
+
+    with pytest.raises(KeyError) as excinfo:
+        board.claim(card, machine="thinkpad", now=NOW)
+
+    assert "En cours" in str(excinfo.value)
+    assert "refresh" in str(excinfo.value)
+    # And it raised *before* stamping Détail: a claim that half happened
+    # is a claim another machine cannot see and this one cannot undo.
+    assert t.calls == []
+
+
+def test_release_raises_when_the_board_has_no_a_traiter_option():
+    card = Card(identifier="LIV0001", item_id="I_1", status="En cours",
+                detail="thinkpad · 2026-09-12T14:30:00")
+    t = Recorder([{}] * 2)
+    board = Board(_without_status_option("À traiter"), t)
+
+    with pytest.raises(KeyError) as excinfo:
+        board.release(card)
+
+    assert "À traiter" in str(excinfo.value)
+    assert t.calls == []
+
+
+def test_write_raises_when_the_board_has_no_option_for_the_final_status():
+    card = Card(identifier="LIV0001", item_id="I_1", status="En cours", detail="x")
+    t = Recorder([{}] * 8)
+    board = Board(_without_status_option("Terminé"), t)
+
+    with pytest.raises(KeyError) as excinfo:
+        board.write(card, Verdict("Terminé"), pages=1, version="v", now=NOW)
+
+    assert "Terminé" in str(excinfo.value)
+    assert "refresh" in str(excinfo.value)
+    assert t.calls == [], "a card left En cours with a verdict in Détail is stuck"
+
+
+def test_a_cause_the_board_never_modelled_is_still_skipped():
+    """The other half of the rule, and the one that keeps the fix from
+    turning every unmodelled pipeline code into a crashed batch."""
+    card = Card(identifier="LIV0001", item_id="I_1", status="En cours", detail="x")
+    t = Recorder([{}] * 8)
+    board = Board(IDS, t)
+
+    board.write(card, Verdict("Terminé", cause="Disjoncteur", phase="NER",
+                              detail="d", losses=0),
+                pages=1, version="v", now=NOW)
+
+    assert all(variables.get("f") != "F_cause" for _, variables in t.calls)
+    assert all(variables.get("f") != "F_phase" for _, variables in t.calls)
+    # …and the Status it *does* have an option for still landed.
+    assert {"singleSelectOptionId": "o_done"} in [v.get("value") for _, v in t.calls]
+
+
 def test_release_puts_the_card_back_and_clears_the_claim():
     card = Card(identifier="LIV0001", item_id="I_1", status="En cours",
                 detail="thinkpad · 2026-09-12T14:30:00")

@@ -7,7 +7,10 @@ cost of not checking is two machines converting the same volume.
 
 The id file is the contract. A field renamed or recreated in the UI gets
 a new id, so every lookup here is by name against the ids loaded at
-startup, and a name that is missing raises rather than writing nowhere.
+startup, and a name that is missing raises (`StaleIdFile`) rather than
+writing nowhere. The same holds for a missing `Status` option: see
+`_select`, where it is the one single-select that refuses instead of
+skipping.
 """
 
 from dataclasses import dataclass
@@ -40,6 +43,22 @@ query($p:ID!,$c:String){ node(id:$p){ ... on ProjectV2{
 TODO, WIP = "À traiter", "En cours"
 
 
+class StaleIdFile(KeyError):
+    """The board does not have something the id file says it has: a
+    field, or a `Status` option. Either way the file was built against a
+    board that has since changed, and nothing written through it can be
+    trusted.
+
+    A `KeyError` subclass because that is what this raised before it had
+    a name, and callers that catch `KeyError` must keep working. Its
+    `str()` is the message itself, without `KeyError`'s quoting — it is
+    printed to an operator, not to a debugger.
+    """
+
+    def __str__(self):
+        return self.args[0] if self.args else ""
+
+
 @dataclass(frozen=True, slots=True)
 class Card:
     identifier: str
@@ -61,7 +80,7 @@ class Board:
         try:
             return self.fields[name]
         except KeyError:
-            raise KeyError(
+            raise StaleIdFile(
                 f"the board has no field named {name!r} — the id file is "
                 f"stale, run `teille-sync ids refresh`") from None
 
@@ -70,12 +89,32 @@ class Board:
                               "f": self._field(field_name)["id"],
                               "value": value})
 
-    def _select(self, item_id, field_name, label):
-        """Write a single-select. A label the board has no option for is
-        skipped: the pipeline emits steps the board never modelled, and
-        inventing an option would be a guess."""
+    def _select(self, item_id, field_name, label, required=False):
+        """Write a single-select.
+
+        A label the board has no option for is skipped, and `False` says
+        so: the pipeline emits steps and codes the board never modelled
+        (`Phase`, `Cause`), and inventing an option would be a guess.
+
+        `required=True` turns that skip into a refusal, and `Status` is
+        always written that way. A missing `Status` option is not a
+        value the board chose not to model, it is a stale id file — and
+        a skipped one is silent damage rather than a gap. `claim()`
+        writing only `Détail` left the card reading `À traiter` while
+        this machine converted it, so a second machine claims the same
+        document: the one thing claiming exists to prevent. `write()`
+        skipping the final status left the card `En cours` carrying a
+        verdict in `Détail` that `_claim_age` cannot parse, so nothing
+        ever reclaims it either. Both raise, like a missing *field*
+        does, because in both cases nothing downstream is trustworthy.
+        """
         options = self._field(field_name).get("options", {})
         if label is None or label not in options:
+            if required:
+                raise StaleIdFile(
+                    f"the board's {field_name} field has no option named "
+                    f"{label!r} — the id file is stale, run "
+                    f"`teille-sync ids refresh`")
             return False
         self._set(item_id, field_name, {"singleSelectOptionId": options[label]})
         return True
@@ -83,7 +122,7 @@ class Board:
     def claim(self, card, machine, now):
         """Take a card. True if it is ours after the read-back."""
         stamp = f"{machine} · {now.isoformat(timespec='seconds')}"
-        self._select(card.item_id, "Status", WIP)
+        self._select(card.item_id, "Status", WIP, required=True)
         self._set(card.item_id, "Détail", {"text": stamp})
         answer = self.send(READ_ITEM, {"i": card.item_id})
         nodes = (((answer.get("node") or {}).get("fieldValues") or {})
@@ -97,13 +136,13 @@ class Board:
         """Put a claimed card back, and clear the claim with it. An empty
         Détail is what makes a released card indistinguishable from one
         never taken."""
-        self._select(card.item_id, "Status", TODO)
+        self._select(card.item_id, "Status", TODO, required=True)
         self._set(card.item_id, "Détail", {"text": ""})
 
     def write(self, card, verdict, pages, version, now):
         if card.identifier not in self.ids.get("items", {}):
             raise KeyError(f"{card.identifier} has no card on the board")
-        self._select(card.item_id, "Status", verdict.status)
+        self._select(card.item_id, "Status", verdict.status, required=True)
         self._select(card.item_id, "Cause", verdict.cause)
         self._select(card.item_id, "Phase", verdict.phase)
         self._set(card.item_id, "Détail", {"text": verdict.detail[:900]})
