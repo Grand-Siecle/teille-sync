@@ -48,9 +48,9 @@ def fetch(root, identifier, into):
         return None, f"{identifier} is not on the share"
 
     into = Path(into)
-    into.mkdir(parents=True, exist_ok=True)
     target = into / source.name
     try:
+        into.mkdir(parents=True, exist_ok=True)
         expected = source.stat().st_size
         shutil.copyfile(source, target)
     except OSError as why:
@@ -63,7 +63,7 @@ def fetch(root, identifier, into):
     try:
         with zipfile.ZipFile(target) as zf:
             zf.namelist()
-    except (zipfile.BadZipFile, OSError) as why:
+    except (zipfile.BadZipFile, EOFError, OSError) as why:
         target.unlink(missing_ok=True)
         return None, f"the archive will not open: {why}"
     return target, ""
@@ -78,13 +78,16 @@ def publish(tei_path, entities_dir, root, identifier, review, republish):
                        f"pass --republish to replace it")
     try:
         destination.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(tei_path, target)
-        if target.stat().st_size != Path(tei_path).stat().st_size:
-            target.unlink(missing_ok=True)
-            return False, "the upload is a different size than the source"
+        # Copy entities first; TEI is the marker of completion.
         if entities_dir and Path(entities_dir).is_dir():
             where = tei_dir(root) / ENTITIES / identifier
             shutil.copytree(entities_dir, where, dirs_exist_ok=True)
+        # TEI last: if this succeeds, the document is fully published.
+        shutil.copyfile(tei_path, target)
+        if target.stat().st_size != Path(tei_path).stat().st_size:
+            target.unlink(missing_ok=True)
+            return False, ("the upload is a different size than the source — "
+                          "the connection dropped mid-transfer")
     except OSError as why:
         return False, f"the upload failed: {why}"
     return True, ""
