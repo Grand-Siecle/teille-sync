@@ -194,6 +194,35 @@ def test_pending_pages_through_the_whole_board():
     assert t.calls[1][1]["c"] == "CURSOR_1"
 
 
+def test_all_cards_returns_every_status_unfiltered():
+    # Unlike pending() and stale(), all_cards() must not drop a card just
+    # because its status is neither "À traiter" nor an aged "En cours" —
+    # `teille-sync status` needs Terminé/Échec/À vérifier too, and
+    # `teille-sync release` needs to find a card no matter its status.
+    nodes = [
+        _node("I_1", "LIV0001", status="À traiter", detail=""),
+        _node("I_2", "LIV0002", status="Terminé", detail=""),
+        _node("I_3", "LIV0003", status="Échec", detail=""),
+    ]
+    t = Recorder([_page(nodes)])
+    board = Board(IDS, t)
+    cards = board.all_cards()
+    assert {c.identifier: c.status for c in cards} == {
+        "LIV0001": "À traiter", "LIV0002": "Terminé", "LIV0003": "Échec"}
+
+
+def test_all_cards_pages_through_the_whole_board():
+    page1 = _page([_node("I_1", "LIV0001", status="Terminé", detail="")],
+                  has_next=True, cursor="CURSOR_1")
+    page2 = _page([_node("I_3", "LIV0003", status="Échec", detail="")],
+                  has_next=False)
+    t = Recorder([page1, page2])
+    board = Board(IDS, t)
+    cards = board.all_cards()
+    assert {c.identifier for c in cards} == {"LIV0001", "LIV0003"}
+    assert len(t.calls) == 2
+
+
 def test_stale_takes_back_a_claim_older_than_the_threshold():
     old_stamp = "thinkpad · 2026-09-12T08:00:00"   # 6h30 before NOW
     fresh_stamp = "desktop · 2026-09-12T14:29:00"  # 1 minute before NOW

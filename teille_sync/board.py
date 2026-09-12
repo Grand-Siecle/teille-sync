@@ -152,6 +152,15 @@ class Board:
             cursor = page_info.get("endCursor")
         return cards
 
+    def all_cards(self):
+        """Every card on the board, in every status — the unfiltered view
+        that `pending()` and `stale()` each narrow. `teille-sync status`
+        (counts per statut) and `teille-sync release` (looking a named
+        card up regardless of where it sits) both need this; neither
+        `pending()` nor `stale()` can stand in for it, since between them
+        they cover only `À traiter` and an aged slice of `En cours`."""
+        return self._all_cards()
+
     def pending(self):
         """Every card still `À traiter`, in title order.
 
