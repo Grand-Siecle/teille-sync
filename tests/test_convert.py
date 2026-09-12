@@ -448,3 +448,50 @@ def test_validate_returns_empty_dict_when_no_documents_have_files(monkeypatch, t
     result = validate(output_dir, ["LIV0001_reconciled", "LIV0002_reconciled"])
     assert result == {}
     assert not called
+
+
+def test_a_validator_that_produced_no_report_says_so_per_document(
+        monkeypatch, tmp_path):
+    """Answering `{}` here is indistinguishable from "there was nothing
+    to validate", and downstream that reads as "no opinion" — which makes
+    an unvalidated document `Terminé`. Every document that had a file to
+    validate gets an explicit unread verdict instead."""
+    for doc in ("LIV0001_reconciled", "LIV0002_reconciled"):
+        (tmp_path / f"{doc}.tei.xml").write_text("<TEI/>", encoding="utf-8")
+
+    def mock_run(argv, **kwargs):
+        result = MagicMock()
+        result.returncode = 3
+        result.stdout = "Traceback (most recent call last):\n"
+        result.stderr = "teille-douce: no schema could be applied\n"
+        return result
+
+    monkeypatch.setattr(teille_sync.convert.subprocess, "run", mock_run)
+
+    got = validate(tmp_path, ["LIV0001_reconciled", "LIV0002_reconciled"])
+
+    assert set(got) == {"LIV0001_reconciled", "LIV0002_reconciled"}
+    for entry in got.values():
+        assert entry["read"] is False
+        assert entry["valid"] is False
+        assert "no schema could be applied" in entry["errors"][0]
+
+
+def test_a_report_that_parsed_is_marked_read(monkeypatch, tmp_path):
+    (tmp_path / "LIV0001_reconciled.tei.xml").write_text("<TEI/>", encoding="utf-8")
+    report = {"files": [{"path": "LIV0001_reconciled.tei.xml",
+                         "errors": [], "warnings": []}], "errors": 0}
+
+    def mock_run(argv, **kwargs):
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = json.dumps(report)
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(teille_sync.convert.subprocess, "run", mock_run)
+
+    got = validate(tmp_path, ["LIV0001_reconciled"])
+
+    assert got["LIV0001_reconciled"]["read"] is True
+    assert got["LIV0001_reconciled"]["valid"] is True

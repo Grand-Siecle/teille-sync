@@ -541,6 +541,61 @@ def test_an_empty_but_present_archives_folder_is_not_a_vanished_share(
     assert all(v.status == "Bloqué" for v in result.outcomes.values())
 
 
+# -- a validation nobody could read is a loss, and is said out loud ----------
+
+def _unreadable_validation(docs_reason="the validator produced no report"):
+    def fake(output_dir, docs):
+        return {d: {"valid": False, "read": False, "errors": [docs_reason]}
+                for d in docs}
+    return fake
+
+
+def test_a_document_whose_validation_could_not_be_read_is_not_finished(
+        tmp_path, monkeypatch):
+    identifiers = _five()
+    root = _share(tmp_path, identifiers)
+    _patch_common(monkeypatch, ALL_OK)
+    monkeypatch.setattr(batch, "validate", _unreadable_validation())
+    board = FakeBoard(_cards(identifiers))
+
+    result = batch.run_batch(_settings(tmp_path, root), board, NOW)
+
+    assert all(v.status == "À vérifier" for v in result.outcomes.values())
+    assert all(v.detail for v in result.outcomes.values()), \
+        "an empty Détail is what made this invisible on the card"
+
+
+def test_a_batch_says_how_many_validations_it_could_not_read(tmp_path,
+                                                             monkeypatch):
+    """Every phase reports what it lost. A validator that died is a loss,
+    and a batch that does not name it looks exactly like a batch whose
+    documents all validated."""
+    identifiers = _five()
+    root = _share(tmp_path, identifiers)
+    _patch_common(monkeypatch, ALL_OK)
+    monkeypatch.setattr(batch, "validate", _unreadable_validation())
+    board = FakeBoard(_cards(identifiers))
+
+    result = batch.run_batch(_settings(tmp_path, root), board, NOW)
+
+    assert "5" in result.message
+    assert "LIV0001" in result.message
+    assert "validat" in result.message.lower()
+
+
+def test_a_batch_whose_validations_all_parsed_says_nothing_about_them(
+        tmp_path, monkeypatch):
+    identifiers = _five()
+    root = _share(tmp_path, identifiers)
+    _patch_common(monkeypatch, ALL_OK)
+    board = FakeBoard(_cards(identifiers))
+
+    result = batch.run_batch(_settings(tmp_path, root), board, NOW)
+
+    assert result.message == ""
+    assert all(v.status == "Terminé" for v in result.outcomes.values())
+
+
 # -- a board write that fails must not abort the batch ------------------------
 #
 # The write loop runs *after* publication. An exception there — a GitHub

@@ -33,6 +33,15 @@ PHASE_BY_STEP = {
     "ner": "NER",
 }
 
+# The codes that mean the document died, as opposed to the ones that mean
+# something inside it was lost while it carried on. Incidents append in
+# occurrence order, so a volume that emitted `page_unusable` at page 12
+# and then died of `document_failed` recorded the page loss first — and
+# naming the failure after it filed a document that never converted under
+# "Pages perdues".
+TERMINAL_CODES = ("document_failed", "volume_unreadable", "archive_corrupt",
+                  "phase_lost")
+
 BLOCKED, FAILED, REVIEW, DONE = "Bloqué", "Échec", "À vérifier", "Terminé"
 
 
@@ -47,6 +56,22 @@ class Verdict:
 
 def _mine(incidents, doc):
     return [i for i in incidents if i.get("document") == doc]
+
+
+def _names_the_failure(ours):
+    """Which of this document's incidents gets to name its failure.
+
+    The first one carrying a terminal code, in occurrence order; the
+    first incident of any kind when nothing terminal was recorded. Among
+    terminal codes occurrence order is kept rather than ranked: each of
+    them is a true cause of death, and inventing a hierarchy between
+    "the archive was corrupt" and "the document failed" would be a guess
+    where the run already said which came first.
+    """
+    for incident in ours:
+        if incident.get("code") in TERMINAL_CODES:
+            return incident
+    return ours[0] if ours else {}
 
 
 def decide(doc, run_manifest, incidents, validation, fetched):
@@ -64,13 +89,12 @@ def decide(doc, run_manifest, incidents, validation, fetched):
     losses = sum(int(i.get("count") or 0) for i in ours)
 
     if outcome == "failed":
-        first = ours[0] if ours else {}
-        code = first.get("code", "")
+        named = _names_the_failure(ours)
         return Verdict(
             FAILED,
-            cause=CAUSE_BY_CODE.get(code, "Autre"),
-            phase=PHASE_BY_STEP.get(first.get("step", "")),
-            detail=first.get("detail") or "no detail recorded",
+            cause=CAUSE_BY_CODE.get(named.get("code", ""), "Autre"),
+            phase=PHASE_BY_STEP.get(named.get("step", "")),
+            detail=named.get("detail") or "no detail recorded",
             losses=losses,
         )
 
@@ -90,6 +114,20 @@ def decide(doc, run_manifest, incidents, validation, fetched):
 
     if validation is not None and not validation.get("valid", False):
         errors = validation.get("errors") or []
+        # `read` is False when `convert.validate` could not parse a
+        # report at all. That is not a schema failure — nothing said the
+        # schema failed — so it does not claim to be one; it is a
+        # document nobody checked, which is a reason to look rather than
+        # a reason to publish it as finished.
+        if not validation.get("read", True):
+            said = "; ".join(errors[:3])
+            return Verdict(
+                REVIEW,
+                cause="Autre",
+                detail=("the validator's report could not be read"
+                        + (f": {said}" if said else "")),
+                losses=losses,
+            )
         return Verdict(
             REVIEW,
             cause="Validation schéma",

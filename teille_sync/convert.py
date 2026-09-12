@@ -187,6 +187,11 @@ def validate(output_dir, docs):
     There is **no `valid` key**: a document is valid when its `errors` list
     is empty. Errors are plain strings. The command exits 1 when anything
     failed and 0 when everything passed.
+
+    What comes back carries `read`, which the validator's own report does
+    not: `True` when this function parsed a report about that document,
+    `False` when it could not parse one at all. A caller that cannot tell
+    those apart treats an unvalidated document as a valid one.
     """
     output_dir = Path(output_dir)
 
@@ -206,14 +211,24 @@ def validate(output_dir, docs):
     try:
         report = json.loads(proc.stdout)
     except json.JSONDecodeError:
-        # The validator refused before producing a report. Say nothing
-        # rather than claim every document is valid.
-        return {}
+        # The validator refused before producing a report. Answering
+        # `{}` here was indistinguishable from "there was nothing to
+        # validate", and `verdict.decide` reads a missing entry as "no
+        # opinion" — so a document nobody validated came out `Terminé`,
+        # published, with an empty Détail. That is the opposite of
+        # saying nothing. Every document that *had* a file to validate
+        # gets an explicit unread verdict instead, and `read: False` is
+        # what tells it apart from a document the validator rejected.
+        said = (proc.stderr or proc.stdout or "").strip().splitlines()
+        reason = said[-1].strip() if said else "the validator produced no report"
+        return {Path(path).name.removesuffix(".tei.xml"):
+                {"valid": False, "read": False, "errors": [reason]}
+                for path in file_paths}
     verdicts = {}
     for entry in report.get("files") or []:
         stem = Path(entry.get("path") or "").name.removesuffix(".tei.xml")
         if not stem:
             continue
         errors = [str(e) for e in (entry.get("errors") or [])]
-        verdicts[stem] = {"valid": not errors, "errors": errors}
+        verdicts[stem] = {"valid": not errors, "read": True, "errors": errors}
     return verdicts

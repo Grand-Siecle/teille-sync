@@ -58,7 +58,7 @@ from pathlib import Path
 from teille_sync import exits, nas
 from teille_sync.convert import (latest_run, read_incidents, read_manifest,
                                  run_converter, validate)
-from teille_sync.names import pipeline_name
+from teille_sync.names import identifier_of, pipeline_name
 from teille_sync.preflight import CONVERTER_NAME, preflight
 from teille_sync.verdict import DONE, REVIEW, decide
 
@@ -325,6 +325,20 @@ def run_batch(settings, board, now, republish=False, keep=False):
                 manifest = read_manifest(run_dir)
                 incidents = read_incidents(run_dir)
                 validation = validate(output_dir, pipeline_docs)
+
+                # A validator that died is a loss like any other, and a
+                # batch that does not name it reads exactly like a batch
+                # whose documents all validated. Each of these judges
+                # `À vérifier` rather than `Terminé` (verdict.py), which
+                # is only half of saying so.
+                unread = sorted(doc for doc, said in validation.items()
+                                if not said.get("read", True))
+                if unread:
+                    named = ", ".join(identifier_of(d) for d in unread)
+                    notes.append(
+                        f"the validator produced no readable report for "
+                        f"{len(unread)} document(s) ({named}) — each is "
+                        f"À vérifier rather than Terminé")
 
             if notes:
                 result.message = "; ".join(notes)
