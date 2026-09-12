@@ -35,6 +35,14 @@ stopped at the first page could clear a migration that destroys a
 `Cause` value sitting on, say, card 150.
 
 Do not run this against the real board without `--check` first.
+
+**And run `teille-sync ids refresh` immediately afterwards.** The
+mutation mints a new id for every option it writes, so the id file
+describes a `Cause` field that no longer exists the moment this returns.
+`Board._select` skips a `Cause` label it has no option for — silently,
+because unlike `Status` an unmodelled Cause is a legitimate thing for the
+pipeline to emit — so a stale file means every `Cause` write lands
+nowhere and the whole corpus runs with a blank column.
 """
 
 import argparse
@@ -186,6 +194,20 @@ def main(argv=None):
     else:
         names = ", ".join(o.get("name", "?") for o in options)
         print(f"realign_cause: Cause now offers: {names}")
+        # Not a footnote. `updateProjectV2Field` minted a new id for
+        # every option above, so `project-board-ids.json` now describes
+        # a Cause field that no longer exists — and `Board._select`
+        # *skips* a Cause label it has no option for, silently, because
+        # Cause is not Status. Without this step the next run writes a
+        # verdict to every card with the Cause column left blank, all
+        # 396 of them, and nothing says why.
+        print("")
+        print("realign_cause: !! the id file is now stale — every option "
+              "above has a NEW id.")
+        print("realign_cause: !! run `teille-sync ids refresh` before the "
+              "next `teille-sync run`,")
+        print("realign_cause: !! or every Cause write will be skipped and "
+              "the column will stay blank.")
     return exits.OK
 
 

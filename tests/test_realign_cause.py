@@ -234,3 +234,36 @@ def test_main_reports_a_board_transport_error_as_misconfigured(monkeypatch, caps
 
     assert code == exits.MISCONFIGURED
     assert "no token" in capsys.readouterr().err
+
+
+def test_main_tells_the_operator_the_id_file_is_now_stale(monkeypatch, capsys):
+    """`updateProjectV2Field` mints a fresh option id for every option it
+    writes, so the moment this runs, `project-board-ids.json` describes a
+    `Cause` field that no longer exists. `Board._select` skips a label it
+    has no option for — silently, because Cause is not Status — so every
+    `Cause` write for the whole corpus would land nowhere and the column
+    would come out blank. The script has to say so where it cannot be
+    missed."""
+    mutation_answer = {"updateProjectV2Field": {"projectV2Field": {
+        "options": [{"name": n} for n, _, _ in realign_cause.CAUSES]}}}
+    board = Board(IDS, Recorder([_page([_node("I_1", "LIV0001")]),
+                                mutation_answer]))
+    monkeypatch.setattr(cli, "_open_board", lambda settings: board)
+
+    realign_cause.main([])
+
+    out = capsys.readouterr().out
+    assert "teille-sync ids refresh" in out
+    assert "stale" in out.lower() or "new id" in out.lower()
+
+
+def test_the_check_run_does_not_claim_the_id_file_is_stale(monkeypatch, capsys):
+    """`--check` writes nothing, so it mints no ids and the file is fine.
+    Telling someone to rebuild it after a no-op teaches them to skip the
+    line that matters."""
+    board = Board(IDS, Recorder([_page([_node("I_1", "LIV0001")])]))
+    monkeypatch.setattr(cli, "_open_board", lambda settings: board)
+
+    realign_cause.main(["--check"])
+
+    assert "ids refresh" not in capsys.readouterr().out

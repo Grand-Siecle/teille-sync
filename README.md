@@ -119,6 +119,32 @@ teille-sync ids refresh    # rebuild project-board-ids.json from the live board
   `project-board-ids.json` last recorded — a stale file means a write
   that raises rather than lands nowhere.
 
+## Realigning the board's Cause options
+
+`scripts/realign_cause.py` replaces the `Cause` field's options with the
+twelve the pipeline actually emits. Run it from the project's Python
+3.12 venv, and always with `--check` first — it refuses outright if any
+card already carries a `Cause` value, because the mutation replaces the
+option list wholesale and would detach every one of those cards from
+whatever it points to.
+
+```bash
+python scripts/realign_cause.py --check   # inspect only, writes nothing
+python scripts/realign_cause.py           # inspect, then replace
+teille-sync ids refresh                   # NOT optional — see below
+```
+
+**`teille-sync ids refresh` immediately afterwards is part of the
+migration, not a tidy-up.** `updateProjectV2Field` mints a new id for
+every option it writes, so the second that script returns,
+`project-board-ids.json` describes a `Cause` field that no longer
+exists. A `Cause` label the id file has no option for is *skipped* —
+silently, because unlike `Status` an unmodelled Cause is something the
+pipeline is allowed to emit — so a stale file means every `Cause` write
+lands nowhere and all 396 documents run with a blank column. The script
+says so in its own closing output; this is the same warning, where
+someone reading the README will find it.
+
 ## When a batch dies halfway
 
 This is the paragraph worth finding at 18:00, with five cards stuck on

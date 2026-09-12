@@ -69,15 +69,42 @@ def fetch(root, identifier, into):
     return target, ""
 
 
+def published_at(root, identifier):
+    """The two places one document can sit on the share, finished first.
+
+    A document belongs in exactly one of them, and which one depends on
+    a verdict that can change between runs: `Terminé` on Monday and `À
+    vérifier` on Tuesday used to leave a copy in each, with the card
+    describing only the second. Both are checked before either is
+    written.
+    """
+    return (tei_dir(root) / f"{identifier}.tei.xml",
+            tei_dir(root) / REVIEW / f"{identifier}.tei.xml")
+
+
 def publish(tei_path, entities_dir, root, identifier, review, republish):
     """Put one document on the share. Returns (True, "") or (False, reason)."""
     destination = tei_dir(root) / (REVIEW if review else "")
     target = destination / f"{identifier}.tei.xml"
-    if target.exists() and not republish:
-        return False, (f"{target.name} is already published — "
-                       f"pass --republish to replace it")
+    # Both locations, not just the one about to be written: see
+    # `published_at`. `--republish` removes the copy in the other folder
+    # rather than adding a second one beside it.
+    existing = [path for path in published_at(root, identifier) if path.exists()]
+    if existing and not republish:
+        where = ", ".join(
+            str(path.relative_to(tei_dir(root)).parent) if path.parent != tei_dir(root)
+            else str(tei_dir(root).name) for path in existing)
+        return False, (f"{identifier}.tei.xml is already published in "
+                       f"{where} — pass --republish to replace it")
     try:
         destination.mkdir(parents=True, exist_ok=True)
+        for stale in existing:
+            # Only the copy this publish is not about to overwrite: the
+            # target itself is replaced by the copy below, and unlinking
+            # it first would lose the published document if that copy
+            # then failed.
+            if stale != target:
+                stale.unlink(missing_ok=True)
         # Copy entities first; TEI is the marker of completion.
         if entities_dir and Path(entities_dir).is_dir():
             where = tei_dir(root) / ENTITIES / identifier

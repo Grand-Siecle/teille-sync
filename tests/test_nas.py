@@ -94,6 +94,89 @@ def test_review_goes_to_its_own_folder(tmp_path):
     assert not (tei_dir(root) / "LIV0001.tei.xml").exists()
 
 
+# -- one document, one place on the share ------------------------------------
+#
+# The refusal used to be keyed on the destination it was about to write, so
+# a re-run that changed its mind published to the other folder and left the
+# first copy behind: `tei/X.tei.xml` from run 1 and
+# `tei/_a_verifier/X.tei.xml` from run 2, with the card describing only
+# one of them. Both directions of that split are refused.
+
+def _local_tei(tmp_path, text="<TEI/>"):
+    tei = tmp_path / "out" / "LIV0001_reconciled.tei.xml"
+    tei.parent.mkdir(parents=True, exist_ok=True)
+    tei.write_text(text, encoding="utf-8")
+    return tei
+
+
+def test_a_document_already_finished_is_not_republished_into_review(tmp_path):
+    root = _share(tmp_path)
+    (tei_dir(root) / "LIV0001.tei.xml").write_text("run 1", encoding="utf-8")
+    tei = _local_tei(tmp_path)
+
+    ok, why = publish(tei, None, root, "LIV0001", review=True, republish=False)
+
+    assert not ok
+    assert "--republish" in why
+    assert not (tei_dir(root) / "_a_verifier" / "LIV0001.tei.xml").exists()
+    assert (tei_dir(root) / "LIV0001.tei.xml").read_text() == "run 1"
+
+
+def test_a_document_already_in_review_is_not_republished_as_finished(tmp_path):
+    root = _share(tmp_path)
+    review = tei_dir(root) / "_a_verifier"
+    review.mkdir(parents=True)
+    (review / "LIV0001.tei.xml").write_text("run 1", encoding="utf-8")
+    tei = _local_tei(tmp_path)
+
+    ok, why = publish(tei, None, root, "LIV0001", review=False, republish=False)
+
+    assert not ok
+    assert "--republish" in why
+    assert not (tei_dir(root) / "LIV0001.tei.xml").exists()
+    assert (review / "LIV0001.tei.xml").read_text() == "run 1"
+
+
+def test_republish_moves_a_finished_document_into_review_without_leaving_a_copy(
+        tmp_path):
+    root = _share(tmp_path)
+    (tei_dir(root) / "LIV0001.tei.xml").write_text("run 1", encoding="utf-8")
+    tei = _local_tei(tmp_path, "run 2")
+
+    ok, why = publish(tei, None, root, "LIV0001", review=True, republish=True)
+
+    assert ok, why
+    assert (tei_dir(root) / "_a_verifier" / "LIV0001.tei.xml").read_text() == "run 2"
+    assert not (tei_dir(root) / "LIV0001.tei.xml").exists()
+
+
+def test_republish_moves_a_review_document_into_tei_without_leaving_a_copy(
+        tmp_path):
+    root = _share(tmp_path)
+    review = tei_dir(root) / "_a_verifier"
+    review.mkdir(parents=True)
+    (review / "LIV0001.tei.xml").write_text("run 1", encoding="utf-8")
+    tei = _local_tei(tmp_path, "run 2")
+
+    ok, why = publish(tei, None, root, "LIV0001", review=False, republish=True)
+
+    assert ok, why
+    assert (tei_dir(root) / "LIV0001.tei.xml").read_text() == "run 2"
+    assert not (review / "LIV0001.tei.xml").exists()
+
+
+def test_the_refusal_says_which_of_the_two_folders_already_holds_it(tmp_path):
+    root = _share(tmp_path)
+    review = tei_dir(root) / "_a_verifier"
+    review.mkdir(parents=True)
+    (review / "LIV0001.tei.xml").write_text("run 1", encoding="utf-8")
+    tei = _local_tei(tmp_path)
+
+    _, why = publish(tei, None, root, "LIV0001", review=False, republish=False)
+
+    assert "_a_verifier" in why
+
+
 def test_entities_travel_with_the_tei(tmp_path):
     root = _share(tmp_path)
     tei = tmp_path / "out" / "LIV0001_reconciled.tei.xml"
