@@ -26,6 +26,12 @@ something dies halfway:
   the run). Every card claimed this batch goes back to `À traiter`
   unjudged: a card reading `Échec` for a document that was never opened
   is the same lie as a loss counter left at zero by a dead service.
+* **A share that goes away is not five documents that are missing.**
+  `nas.fetch` says "is not on the share" for an absent archive and for a
+  dropped tunnel alike. Every failed fetch asks `_share_is_gone()` which
+  of the two it was, and a share that is gone releases every claim and
+  exits 3 rather than filing five present documents under `Absent du
+  NAS` — a status nothing reclaims automatically.
 * **A converter that dies without writing a run record is not a converter
   that wrote nothing.** `output_dir` persists across batches, and
   teille-douce only writes `run.json` on a clean exit. `latest_run()` is
@@ -41,6 +47,7 @@ Owns no console: everything below is a `BatchResult` for a later module
 (Task 8's `report.py`) to render.
 """
 
+import os
 import re
 import shutil
 import socket
@@ -155,6 +162,33 @@ def _append_detail(verdict, note):
     return replace(verdict, detail=detail)
 
 
+def _share_is_gone(nas_root):
+    """Is the *share* gone, rather than this one archive missing?
+
+    `nas.fetch` answers "is not on the share" for both, and taken at face
+    value the second one files five present documents as `Bloqué` /
+    `Absent du NAS` — a status `--until-done` never revisits, recoverable
+    only by five `teille-sync release` calls the operator has to think of
+    first. So a failed fetch asks this before it blames the document.
+
+    Touching the archives directory rather than dialling
+    `nas.reachable()`: it is cheaper — no socket, no timeout on the four
+    fetches that follow a genuinely absent archive — and it catches an
+    unmounted drive, which a host that answers on 445 would not. A
+    `scandir` and not an `is_dir()`: `is_dir()` swallows the `OSError` a
+    dropped SMB mount raises and answers False for it and for "the path
+    was never there" alike, and this has to touch the share to mean
+    anything. An empty `zip_reconciliate/` is a present share, not a
+    gone one.
+    """
+    try:
+        with os.scandir(nas.archives_dir(nas_root)) as entries:
+            next(iter(entries), None)
+    except OSError:
+        return True
+    return False
+
+
 def _delete_local_source(input_dir, identifier):
     """What `fetch()` left behind for one document: the archive itself,
     and anything the converter expanded from it under the same name.
@@ -220,6 +254,20 @@ def run_batch(settings, board, now, republish=False, keep=False):
             local, reason = nas.fetch(settings.nas_root, card.identifier, input_dir)
             fetched_path[card.identifier] = local
             if local is None:
+                if _share_is_gone(settings.nas_root):
+                    # The tunnel went down under us. Nothing here is
+                    # evidence about any document, so nothing is judged:
+                    # every claim goes back, the way a converter refusal
+                    # hands them back, and the batch exits 3.
+                    for held in claimed:
+                        board.release(held)
+                    result.released = [c.identifier for c in claimed]
+                    result.exit_code = exits.MISCONFIGURED
+                    result.message = (
+                        f"the share stopped answering while fetching "
+                        f"{card.identifier} — check the VPN and the mount; "
+                        f"every claim was released and nothing was judged")
+                    return result
                 fetch_reason[card.identifier] = reason
 
         pipeline_docs = [pipeline_name(c.identifier) for c in claimed

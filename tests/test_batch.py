@@ -23,6 +23,7 @@ subprocess.
 
 import inspect
 import json
+import shutil
 import socket
 import zipfile
 from dataclasses import replace
@@ -413,6 +414,119 @@ def test_a_truncated_copy_carries_its_real_reason_not_just_absent(tmp_path, monk
     assert outcome.status == "Bloqué"
     assert outcome.cause == "Absent du NAS"   # verdict.py's own label is kept
     assert "dropped" in outcome.detail or "size" in outcome.detail
+
+
+# -- A share that goes away mid-fetch ----------------------------------------
+#
+# `nas.fetch` answers "is not on the share" for an archive that is missing
+# and for a share that is no longer there — the same sentence for two very
+# different facts. Taken at face value the second one files five present
+# documents as `Bloqué` / `Absent du NAS`, and a Bloqué card is never
+# reclaimed by `--until-done`: recovery costs five `teille-sync release`
+# calls the operator has to think of first. The spec's own rule for this
+# row is "remaining claims released, exit 3".
+
+def test_a_share_that_vanishes_mid_fetch_releases_every_claim(tmp_path, monkeypatch):
+    identifiers = _five()
+    root = _share(tmp_path, identifiers)
+    _patch_common(monkeypatch, ALL_OK)
+    board = FakeBoard(_cards(identifiers))
+
+    real_fetch = nas.fetch
+
+    def fetch_until_the_tunnel_drops(nas_root, identifier, into):
+        if identifier == "LIV0003":
+            shutil.rmtree(nas_root)      # the VPN goes down mid-batch
+        return real_fetch(nas_root, identifier, into)
+
+    monkeypatch.setattr(batch.nas, "fetch", fetch_until_the_tunnel_drops)
+
+    result = batch.run_batch(_settings(tmp_path, root), board, NOW)
+
+    assert result.exit_code == exits.MISCONFIGURED
+    assert sorted(result.released) == sorted(identifiers)
+    assert sorted(board.release_calls) == sorted(identifiers)
+
+
+def test_a_vanished_share_marks_no_document_bloque(tmp_path, monkeypatch):
+    """The distinguishing half: five present documents must not be filed
+    as absent from a share that is simply unreachable. Nothing is judged,
+    so nothing is written to a card."""
+    identifiers = _five()
+    root = _share(tmp_path, identifiers)
+    _patch_common(monkeypatch, ALL_OK)
+    board = FakeBoard(_cards(identifiers))
+
+    real_fetch = nas.fetch
+
+    def fetch_until_the_tunnel_drops(nas_root, identifier, into):
+        if identifier == "LIV0003":
+            shutil.rmtree(nas_root)
+        return real_fetch(nas_root, identifier, into)
+
+    monkeypatch.setattr(batch.nas, "fetch", fetch_until_the_tunnel_drops)
+
+    result = batch.run_batch(_settings(tmp_path, root), board, NOW)
+
+    assert result.outcomes == {}
+    assert board.write_calls == []
+
+
+def test_a_vanished_share_says_which_document_was_being_fetched(tmp_path,
+                                                                monkeypatch):
+    identifiers = _five()
+    root = _share(tmp_path, identifiers)
+    _patch_common(monkeypatch, ALL_OK)
+    board = FakeBoard(_cards(identifiers))
+
+    real_fetch = nas.fetch
+
+    def fetch_until_the_tunnel_drops(nas_root, identifier, into):
+        if identifier == "LIV0003":
+            shutil.rmtree(nas_root)
+        return real_fetch(nas_root, identifier, into)
+
+    monkeypatch.setattr(batch.nas, "fetch", fetch_until_the_tunnel_drops)
+
+    result = batch.run_batch(_settings(tmp_path, root), board, NOW)
+
+    assert "LIV0003" in result.message
+    assert len(result.claimed) == 5, "a released batch still says what it took"
+
+
+def test_one_absent_archive_on_a_healthy_share_releases_nothing(tmp_path,
+                                                                monkeypatch):
+    """The other side of the same guard, and the one that keeps it from
+    swallowing the normal case: an archive that is genuinely missing while
+    the share is right there is still that one card's `Bloqué`, and the
+    other four still convert."""
+    identifiers = _five()
+    present = identifiers[:4]
+    root = _share(tmp_path, present)
+    manifest = {"documents": {pipeline_name(i): "ok" for i in present}}
+    _patch_common(monkeypatch, manifest)
+    board = FakeBoard(_cards(identifiers))
+
+    result = batch.run_batch(_settings(tmp_path, root), board, NOW)
+
+    assert board.release_calls == []
+    assert result.released == []
+    assert result.outcomes[identifiers[4]].status == "Bloqué"
+
+
+def test_an_empty_but_present_archives_folder_is_not_a_vanished_share(
+        tmp_path, monkeypatch):
+    """A share whose `zip_reconciliate/` holds nothing is reachable and
+    readable — every card is `Bloqué`, and none is released."""
+    identifiers = _five()
+    root = _share(tmp_path, [])
+    _patch_common(monkeypatch, {"documents": {}})
+    board = FakeBoard(_cards(identifiers))
+
+    result = batch.run_batch(_settings(tmp_path, root), board, NOW)
+
+    assert board.release_calls == []
+    assert all(v.status == "Bloqué" for v in result.outcomes.values())
 
 
 # -- Rule 3: KeyboardInterrupt ------------------------------------------------
