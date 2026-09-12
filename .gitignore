@@ -1,0 +1,9 @@
+__pycache__/
+*.egg-info/
+.venv/
+venv/
+config.local.toml
+project-board-ids.json
+work/
+.coverage*
+.superpowers/
