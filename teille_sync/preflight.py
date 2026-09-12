@@ -254,8 +254,14 @@ def _check_services(settings):
                      "install teille-douce and make sure it is on PATH")
 
     if ok:
-        detail = output if output else "the converter's own preflight passed"
-        return Check("Services", True, detail, "")
+        # One line, not the converter's whole report: this check passes
+        # on every healthy run — the report is thirty lines wide and
+        # ends with `unusable — nothing to convert`, which is true of an
+        # input directory nothing has been fetched into yet and reads
+        # like a failure beside a green `ok`. Verbatim is for the
+        # refusal below, which is where it carries something.
+        return Check("Services", True,
+                     "VieuxParler, PyHellen and NER models all report up", "")
 
     # The converter's own words, verbatim — not a paraphrase.
     detail = output if output else "the converter's own preflight refused"

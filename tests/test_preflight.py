@@ -116,6 +116,30 @@ def test_services_up_passes_and_says_so(tmp_path, monkeypatch):
     assert _by(checks, "Services").ok
 
 
+def test_a_passing_services_check_names_the_three_in_one_line(tmp_path,
+                                                              monkeypatch):
+    """The converter's report is thirty lines wide and this check now
+    passes on every healthy run — printing all of it into a table cell
+    every time teaches an operator to skip the row. Verbatim is for the
+    refusal, which is where it carries something."""
+    (tmp_path / "OCR" / "zip_reconciliate").mkdir(parents=True)
+    monkeypatch.setattr(
+        "teille_sync.preflight.check_services",
+        lambda d: (True, "  services   VieuxParler modernization    up\n"
+                         "             PyHellen    enrichment       up\n"
+                         "             NER models  entity recognition  up\n"
+                         "\n  unusable — nothing to convert\n"))
+    checks = preflight(_settings(nas_root=tmp_path),
+                       probe=lambda h, **k: (True, ""))
+
+    services = _by(checks, "Services")
+    assert services.ok
+    assert services.detail.count("\n") == 0
+    for name in ("VieuxParler", "PyHellen", "NER models"):
+        assert name in services.detail
+    assert "nothing to convert" not in services.detail
+
+
 def test_a_missing_converter_says_how_to_install_it(tmp_path):
     (tmp_path / "OCR" / "zip_reconciliate").mkdir(parents=True)
     checks = preflight(_settings(nas_root=tmp_path),
