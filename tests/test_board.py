@@ -1,0 +1,213 @@
+from datetime import datetime, timedelta
+import pytest
+from teille_sync.board import Board, Card
+from teille_sync.verdict import Verdict
+
+IDS = {
+    "project": {"id": "PVT_test"},
+    "fields": {
+        "Status": {"id": "F_status", "dataType": "SINGLE_SELECT",
+                   "options": {"À traiter": "o_todo", "En cours": "o_wip",
+                               "Bloqué": "o_blocked", "Échec": "o_failed",
+                               "À vérifier": "o_review", "Terminé": "o_done"}},
+        "Phase": {"id": "F_phase", "dataType": "SINGLE_SELECT",
+                  "options": {"sourceDoc": "o_sd", "Décompression": "o_exp"}},
+        "Cause": {"id": "F_cause", "dataType": "SINGLE_SELECT",
+                  "options": {"Absent du NAS": "o_nas", "Document en échec": "o_docfail"}},
+        "Détail": {"id": "F_detail", "dataType": "TEXT"},
+        "Pertes": {"id": "F_losses", "dataType": "NUMBER"},
+        "Pages": {"id": "F_pages", "dataType": "NUMBER"},
+        "Date de traitement": {"id": "F_date", "dataType": "DATE"},
+        "Version pipeline": {"id": "F_version", "dataType": "TEXT"},
+    },
+    "items": {"LIV0001": "I_1", "LIV0002": "I_2"},
+}
+NOW = datetime(2026, 9, 12, 14, 30, 0)
+
+
+class Recorder:
+    """A transport that answers from a script and records what it was asked."""
+
+    def __init__(self, answers):
+        self.answers = list(answers)
+        self.calls = []
+
+    def __call__(self, query, variables):
+        self.calls.append((query, variables))
+        return self.answers.pop(0) if self.answers else {}
+
+
+def test_claim_writes_status_then_detail_and_reads_back(monkeypatch):
+    card = Card(identifier="LIV0001", item_id="I_1", status="À traiter", detail="")
+    t = Recorder([{}, {}, {"node": {"fieldValues": {"nodes": [
+        {"text": "thinkpad · 2026-09-12T14:30:00",
+         "field": {"name": "Détail"}}]}}}])
+    board = Board(IDS, t)
+    assert board.claim(card, machine="thinkpad", now=NOW) is True
+    # status, detail, read-back
+    assert len(t.calls) == 3
+    assert t.calls[0][1]["value"] == {"singleSelectOptionId": "o_wip"}
+
+
+def test_a_claim_another_machine_won_is_not_ours(monkeypatch):
+    card = Card(identifier="LIV0001", item_id="I_1", status="À traiter", detail="")
+    t = Recorder([{}, {}, {"node": {"fieldValues": {"nodes": [
+        {"text": "desktop · 2026-09-12T14:29:58",
+         "field": {"name": "Détail"}}]}}}])
+    board = Board(IDS, t)
+    assert board.claim(card, machine="thinkpad", now=NOW) is False
+
+
+def test_write_sets_every_field_a_verdict_carries():
+    card = Card(identifier="LIV0001", item_id="I_1", status="En cours", detail="x")
+    t = Recorder([{}] * 8)
+    board = Board(IDS, t)
+    board.write(card, Verdict("Échec", cause="Document en échec",
+                              phase="sourceDoc", detail="boom", losses=3),
+                pages=40, version="teille-douce 2.0.0", now=NOW)
+    sent = [c[1] for c in t.calls]
+    assert {"singleSelectOptionId": "o_failed"} in [s.get("value") for s in sent]
+    assert {"singleSelectOptionId": "o_docfail"} in [s.get("value") for s in sent]
+    assert {"text": "boom"} in [s.get("value") for s in sent]
+    assert {"number": 3} in [s.get("value") for s in sent]
+    assert {"date": "2026-09-12"} in [s.get("value") for s in sent]
+
+
+def test_write_skips_a_phase_the_board_has_no_option_for():
+    card = Card(identifier="LIV0001", item_id="I_1", status="En cours", detail="x")
+    t = Recorder([{}] * 8)
+    board = Board(IDS, t)
+    board.write(card, Verdict("Échec", cause="Autre", phase="Écriture",
+                              detail="d", losses=0),
+                pages=0, version="v", now=NOW)
+    # "Écriture" is not in the test ids: it must be skipped, not sent as null
+    assert all(variables.get("f") != "F_phase" for _, variables in t.calls)
+
+
+def test_release_puts_the_card_back_and_clears_the_claim():
+    card = Card(identifier="LIV0001", item_id="I_1", status="En cours",
+                detail="thinkpad · 2026-09-12T14:30:00")
+    t = Recorder([{}, {}])
+    board = Board(IDS, t)
+    board.release(card)
+    assert t.calls[0][1]["value"] == {"singleSelectOptionId": "o_todo"}
+    assert t.calls[1][1]["value"] == {"text": ""}
+
+
+def test_an_unknown_identifier_is_refused_rather_than_written_nowhere():
+    board = Board(IDS, Recorder([]))
+    with pytest.raises(KeyError):
+        board.write(Card("LIV9999", "I_missing", "En cours", ""),
+                    Verdict("Terminé"), pages=1, version="v", now=NOW)
+
+
+# -- pending() and stale() -----------------------------------------------
+#
+# Both page through PENDING. `_node` and `_page` below build the answers
+# the real API returns: an item node carries its title and a list of
+# field values, each tagged with the name of the field it belongs to —
+# exactly the shape the query's inline fragments produce for a
+# single-select (Status) or a text field (Détail).
+
+def _node(item_id, title, status=None, detail=None):
+    values = []
+    if status is not None:
+        values.append({"name": status, "field": {"name": "Status"}})
+    if detail is not None:
+        values.append({"text": detail, "field": {"name": "Détail"}})
+    return {"id": item_id, "content": {"title": title},
+            "fieldValues": {"nodes": values}}
+
+
+def _page(nodes, has_next=False, cursor=None):
+    return {"node": {"items": {
+        "pageInfo": {"hasNextPage": has_next, "endCursor": cursor},
+        "nodes": nodes}}}
+
+
+def test_pending_returns_only_a_traiter_cards_in_title_order():
+    # Deliberately out of title order in the answer, and mixing in a
+    # status pending() must not return.
+    nodes = [
+        _node("I_2", "LIV0002", status="À traiter", detail=""),
+        _node("I_3", "LIV0003", status="En cours", detail="thinkpad · x"),
+        _node("I_1", "LIV0001", status="À traiter", detail=""),
+    ]
+    t = Recorder([_page(nodes)])
+    board = Board(IDS, t)
+    cards = board.pending()
+    assert [c.identifier for c in cards] == ["LIV0001", "LIV0002"]
+    assert all(c.status == "À traiter" for c in cards)
+
+
+def test_pending_pages_through_the_whole_board():
+    # A first page that stops here would hide LIV0003: it must not.
+    page1 = _page([_node("I_1", "LIV0001", status="À traiter", detail="")],
+                  has_next=True, cursor="CURSOR_1")
+    page2 = _page([_node("I_3", "LIV0003", status="À traiter", detail="")],
+                  has_next=False)
+    t = Recorder([page1, page2])
+    board = Board(IDS, t)
+    cards = board.pending()
+    assert [c.identifier for c in cards] == ["LIV0001", "LIV0003"]
+    assert len(t.calls) == 2
+    assert t.calls[0][1]["c"] is None
+    assert t.calls[1][1]["c"] == "CURSOR_1"
+
+
+def test_stale_takes_back_a_claim_older_than_the_threshold():
+    old_stamp = "thinkpad · 2026-09-12T08:00:00"   # 6h30 before NOW
+    fresh_stamp = "desktop · 2026-09-12T14:29:00"  # 1 minute before NOW
+    nodes = [
+        _node("I_1", "LIV0001", status="En cours", detail=old_stamp),
+        _node("I_2", "LIV0002", status="En cours", detail=fresh_stamp),
+    ]
+    t = Recorder([_page(nodes)])
+    board = Board(IDS, t)
+    cards = board.stale(older_than=timedelta(hours=6), now=NOW)
+    assert [c.identifier for c in cards] == ["LIV0001"]
+
+
+def test_stale_excludes_a_claim_exactly_at_the_threshold():
+    # Exactly 6h old is not yet "older than" 6h.
+    boundary_stamp = "thinkpad · 2026-09-12T08:30:00"
+    nodes = [_node("I_1", "LIV0001", status="En cours", detail=boundary_stamp)]
+    t = Recorder([_page(nodes)])
+    board = Board(IDS, t)
+    assert board.stale(older_than=timedelta(hours=6), now=NOW) == []
+
+
+def test_stale_ignores_cards_that_are_not_en_cours():
+    old_stamp = "thinkpad · 2026-09-12T08:00:00"
+    nodes = [_node("I_1", "LIV0001", status="À traiter", detail=old_stamp),
+            _node("I_2", "LIV0002", status="Terminé", detail=old_stamp)]
+    t = Recorder([_page(nodes)])
+    board = Board(IDS, t)
+    assert board.stale(older_than=timedelta(hours=6), now=NOW) == []
+
+
+@pytest.mark.parametrize("detail", ["", "no separator here", "thinkpad · not-a-date"])
+def test_stale_leaves_alone_an_en_cours_card_with_no_readable_stamp(detail):
+    # An unreadable Détail is not evidence of abandonment: the claiming
+    # machine may simply not have written its stamp in a shape this code
+    # recognizes yet, or a person edited the field by hand. Treating it
+    # as stale would hand the document to a second machine while a first
+    # one is still converting it.
+    nodes = [_node("I_1", "LIV0001", status="En cours", detail=detail)]
+    t = Recorder([_page(nodes)])
+    board = Board(IDS, t)
+    assert board.stale(older_than=timedelta(hours=6), now=NOW) == []
+
+
+def test_stale_pages_through_the_whole_board():
+    old_stamp = "thinkpad · 2026-09-12T08:00:00"
+    page1 = _page([_node("I_1", "LIV0001", status="En cours", detail=old_stamp)],
+                  has_next=True, cursor="CURSOR_1")
+    page2 = _page([_node("I_3", "LIV0003", status="En cours", detail=old_stamp)],
+                  has_next=False)
+    t = Recorder([page1, page2])
+    board = Board(IDS, t)
+    cards = board.stale(older_than=timedelta(hours=6), now=NOW)
+    assert [c.identifier for c in cards] == ["LIV0001", "LIV0003"]
+    assert len(t.calls) == 2
+    assert t.calls[1][1]["c"] == "CURSOR_1"
