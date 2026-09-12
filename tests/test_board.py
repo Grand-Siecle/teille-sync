@@ -58,6 +58,26 @@ def test_a_claim_another_machine_won_is_not_ours(monkeypatch):
     assert board.claim(card, machine="thinkpad", now=NOW) is False
 
 
+@pytest.mark.parametrize("malformed_answer", [
+    {},
+    {"node": None},
+    {"node": {}},
+    {"node": {"fieldValues": {"nodes": [
+        {"text": "thinkpad · 2026-09-12T14:30:00",
+         "field": {"name": "Pertes"}}]}}},
+], ids=["empty_answer", "null_node", "empty_node", "no_detail_field"])
+def test_claim_read_back_never_raises_or_returns_true_on_a_malformed_answer(malformed_answer):
+    # A GraphQL answer missing the shape claim() expects — the request
+    # was rejected, the item vanished, the schema changed underneath us —
+    # must read as "not ours", never crash and never claim the card by
+    # accident. Returning True here would mean two machines convert the
+    # same volume, which is worse than any exception.
+    card = Card(identifier="LIV0001", item_id="I_1", status="À traiter", detail="")
+    t = Recorder([{}, {}, malformed_answer])
+    board = Board(IDS, t)
+    assert board.claim(card, machine="thinkpad", now=NOW) is False
+
+
 def test_write_sets_every_field_a_verdict_carries():
     card = Card(identifier="LIV0001", item_id="I_1", status="En cours", detail="x")
     t = Recorder([{}] * 8)
@@ -99,6 +119,25 @@ def test_an_unknown_identifier_is_refused_rather_than_written_nowhere():
     with pytest.raises(KeyError):
         board.write(Card("LIV9999", "I_missing", "En cours", ""),
                     Verdict("Terminé"), pages=1, version="v", now=NOW)
+
+
+def test_write_raises_when_the_board_has_no_field_for_something_it_must_write():
+    # The symmetric half of "an unknown option is skipped": a missing
+    # *field* means the id file is stale (someone recreated the field in
+    # the UI, which mints a new id), and writing to a dead id would fail
+    # silently or land nowhere. This must raise, unlike a missing option.
+    ids = {
+        "project": IDS["project"],
+        "fields": {name: value for name, value in IDS["fields"].items()
+                  if name != "Pertes"},
+        "items": IDS["items"],
+    }
+    card = Card(identifier="LIV0001", item_id="I_1", status="En cours", detail="x")
+    board = Board(ids, Recorder([{}] * 8))
+    with pytest.raises(KeyError) as excinfo:
+        board.write(card, Verdict("Terminé"), pages=1, version="v", now=NOW)
+    assert "Pertes" in str(excinfo.value)
+    assert "refresh" in str(excinfo.value)
 
 
 # -- pending() and stale() -----------------------------------------------
@@ -194,6 +233,24 @@ def test_stale_leaves_alone_an_en_cours_card_with_no_readable_stamp(detail):
     # as stale would hand the document to a second machine while a first
     # one is still converting it.
     nodes = [_node("I_1", "LIV0001", status="En cours", detail=detail)]
+    t = Recorder([_page(nodes)])
+    board = Board(IDS, t)
+    assert board.stale(older_than=timedelta(hours=6), now=NOW) == []
+
+
+def test_stale_excludes_a_future_dated_stamp_from_clock_skew():
+    # Two machines with skewed clocks write stamps in each other's
+    # future. A negative age (`now - claimed_at`) never exceeds a
+    # positive `older_than`, so a clock-skewed stamp must not be
+    # reclaimed as abandoned. The offset here (7h, past the 6h
+    # threshold) is deliberately larger than `older_than`: a smaller one
+    # would stay under the threshold either way and would not tell a
+    # correct sign (`now - claimed_at`) apart from an accidentally
+    # flipped one (`claimed_at - now`), which would read this same
+    # future stamp as 7h stale and reclaim a card someone is actively
+    # converting.
+    future_stamp = "desktop · 2026-09-12T21:30:00"  # 7h after NOW
+    nodes = [_node("I_1", "LIV0001", status="En cours", detail=future_stamp)]
     t = Recorder([_page(nodes)])
     board = Board(IDS, t)
     assert board.stale(older_than=timedelta(hours=6), now=NOW) == []
