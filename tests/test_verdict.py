@@ -69,6 +69,7 @@ def test_a_lost_phase_outranks_a_schema_failure_in_the_detail():
                       "step": "enrich", "count": 9, "total": 9,
                       "detail": "PyHellen stopped answering"}])
     assert r.status == "Échec"
+    assert r.phase == "Enrichissement"
     assert "PyHellen" in r.detail
 
 
@@ -80,6 +81,8 @@ def test_ok_with_incidents_counts_every_one_of_them():
                      {"code": "container_failed", "document": "LIV0001_reconciled",
                       "step": "sourcedoc", "count": 2, "total": 99, "detail": ""}])
     assert r.status == "À vérifier"
+    assert r.cause == "Pages perdues"
+    assert r.phase == "sourceDoc"
     assert r.losses == 5
 
 
@@ -108,8 +111,50 @@ def test_a_step_the_board_has_no_option_for_leaves_phase_empty():
     assert r.phase is None
 
 
-def test_every_pipeline_code_has_a_board_label():
-    for code in ("archive_corrupt", "volume_unreadable", "page_unusable",
-                 "container_failed", "phase_lost", "batch_failed",
-                 "retry_unanswered", "breaker_skipped", "document_failed"):
-        assert code in CAUSE_BY_CODE, code
+def test_cause_by_code_has_all_required_mappings():
+    expected = {
+        "archive_corrupt": "ZIP illisible",
+        "volume_unreadable": "Volume illisible",
+        "page_unusable": "Pages perdues",
+        "container_failed": "Conteneur en échec",
+        "phase_lost": "Phase perdue",
+        "batch_failed": "Lot refusé",
+        "retry_unanswered": "Relance sans réponse",
+        "breaker_skipped": "Disjoncteur",
+        "document_failed": "Document en échec",
+    }
+    assert CAUSE_BY_CODE == expected
+
+
+def test_phase_by_step_has_all_required_mappings():
+    expected = {
+        "expand": "Décompression",
+        "sourcedoc": "sourceDoc",
+        "enrich": "Enrichissement",
+        "modernize": "Modernisation",
+        "ner": "NER",
+    }
+    assert PHASE_BY_STEP == expected
+
+
+def test_expand_phase_is_correctly_translated():
+    r = v(manifest={"documents": {"LIV0001_reconciled": "failed"}},
+          incidents=[{"code": "archive_corrupt", "document": "LIV0001_reconciled",
+                      "step": "expand", "count": 1, "total": 1, "detail": "bad zip"}])
+    assert r.phase == "Décompression"
+
+
+def test_enrich_phase_is_correctly_translated():
+    r = v(manifest={"documents": {"LIV0001_reconciled": "ok"}},
+          validation={"valid": True},
+          incidents=[{"code": "phase_lost", "document": "LIV0001_reconciled",
+                      "step": "enrich", "count": 1, "total": 1, "detail": "service down"}])
+    assert r.phase == "Enrichissement"
+
+
+def test_ner_phase_is_correctly_translated():
+    r = v(manifest={"documents": {"LIV0001_reconciled": "ok"}},
+          validation={"valid": True},
+          incidents=[{"code": "phase_lost", "document": "LIV0001_reconciled",
+                      "step": "ner", "count": 1, "total": 1, "detail": "model down"}])
+    assert r.phase == "NER"
