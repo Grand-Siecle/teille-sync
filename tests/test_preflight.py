@@ -33,15 +33,27 @@ def test_a_dead_tunnel_stops_everything_and_names_the_vpn():
     assert "VPN" in _by(checks, "VPN").remedy
 
 
-def test_a_windows_drive_missing_from_wsl_gets_the_mount_command(tmp_path,
-                                                                 monkeypatch):
+# `_windows_drive_letter` only recognises a literal `/mnt/<letter>`, so
+# these two cannot point somewhere under tmp_path — the path has to be
+# the real shape. Absence is stubbed instead of assumed: asserting that
+# `/mnt/y` does not exist is asserting that the operator has not mounted
+# the share, which is false on any machine that has run a batch.
+def _nothing_is_mounted(monkeypatch):
     monkeypatch.setattr("teille_sync.preflight.on_wsl", lambda: True)
+    monkeypatch.setattr(Path, "is_dir", lambda self: False)
+
+
+def test_a_windows_drive_missing_from_wsl_gets_the_mount_command(monkeypatch):
+    _nothing_is_mounted(monkeypatch)
     checks = preflight(_settings(nas_root=Path("/mnt/y")),
                        probe=lambda h, **k: (True, ""))
     root = _by(checks, "NAS root")
     assert root.ok is False
     assert "mount -t drvfs" in root.remedy
-    assert "sudo mount -t drvfs Y: /mnt/y" == root.remedy
+    # The mount point is the operator's to create: /mnt/<letter> does not
+    # exist by default, so a bare mount answers `mount point does not
+    # exist` and the remedy has to be run in two halves to work at all.
+    assert root.remedy == "sudo mkdir -p /mnt/y && sudo mount -t drvfs Y: /mnt/y"
 
 
 def test_the_mount_command_uses_the_letter_from_the_configured_root(
@@ -49,12 +61,12 @@ def test_the_mount_command_uses_the_letter_from_the_configured_root(
     """A different drive letter must produce a different command — an
     implementation with "Y:" hardcoded would pass the test above without
     actually deriving the letter from nas_root."""
-    monkeypatch.setattr("teille_sync.preflight.on_wsl", lambda: True)
+    _nothing_is_mounted(monkeypatch)
     checks = preflight(_settings(nas_root=Path("/mnt/z")),
                        probe=lambda h, **k: (True, ""))
     root = _by(checks, "NAS root")
     assert root.ok is False
-    assert root.remedy == "sudo mount -t drvfs Z: /mnt/z"
+    assert root.remedy == "sudo mkdir -p /mnt/z && sudo mount -t drvfs Z: /mnt/z"
 
 
 def test_a_root_without_the_archives_folder_is_the_wrong_root(tmp_path):
@@ -164,11 +176,21 @@ def test_preflight_returns_all_eight_checks_even_when_the_first_fails():
                      "Services", "Metadata", "Disk"]
 
 
-def test_a_missing_converter_does_not_crash_the_services_probe(tmp_path):
+def test_a_missing_converter_does_not_crash_the_services_probe(tmp_path,
+                                                               monkeypatch):
     """check_services() shells out to `teille-douce`; if the binary is not
     on PATH, subprocess raises FileNotFoundError. The Services check must
     turn that into a refusal, not a crash that hides the other seven
     checks from the operator."""
+    # The raise is stubbed rather than arranged by emptying PATH: `which`
+    # is only consulted by the Converter check, so on a machine where the
+    # converter IS installed this used to shell out to it for real, reach
+    # the live services and report them up — the opposite of the refusal
+    # under test.
+    def no_binary(input_dir):
+        raise FileNotFoundError(2, "No such file or directory: 'teille-douce'")
+
+    monkeypatch.setattr("teille_sync.preflight.check_services", no_binary)
     (tmp_path / "OCR" / "zip_reconciliate").mkdir(parents=True)
     checks = preflight(_settings(nas_root=tmp_path),
                        probe=lambda h, **k: (True, ""),

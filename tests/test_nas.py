@@ -1,3 +1,4 @@
+import shutil
 import socket
 import zipfile
 from pathlib import Path
@@ -249,12 +250,43 @@ def test_publish_leaves_no_tei_if_entities_copy_fails(tmp_path, monkeypatch):
     ents.mkdir(parents=True)
     (ents / "persons.csv").write_text("id;name\n", encoding="utf-8")
 
-    def bad_copytree(*a, **k):
-        raise OSError("entities copy failed")
+    real_copyfile = shutil.copyfile
 
-    monkeypatch.setattr("teille_sync.nas.shutil.copytree", bad_copytree)
+    def bad_copyfile(src, dst, *a, **k):
+        if "entities" in Path(dst).parts:
+            raise OSError("entities copy failed")
+        return real_copyfile(src, dst, *a, **k)
+
+    monkeypatch.setattr("teille_sync.nas.shutil.copyfile", bad_copyfile)
     ok, why = publish(tei, ents, root, "LIV0001", review=False, republish=False)
     assert not ok
     assert "upload failed" in why
     tei_file = tei_dir(root) / "LIV0001.tei.xml"
     assert not tei_file.exists(), "no TEI should exist if entities copy fails"
+
+
+# A share mounted over drvfs (a Windows network drive under WSL) copies
+# bytes but refuses chmod and utime with EPERM. Publishing used to go
+# through shutil.copytree, which sets metadata as well and folds that
+# refusal into a shutil.Error; the publish then aborted before the TEI,
+# leaving the entity CSVs on the share, no TEI beside them, and a card
+# that read `Terminé`. Bytes arriving is what publishing is about.
+def test_publish_survives_a_share_that_refuses_metadata(tmp_path, monkeypatch):
+    root = _share(tmp_path)
+    tei = tmp_path / "out" / "LIV0001_reconciled.tei.xml"
+    tei.parent.mkdir(parents=True)
+    tei.write_text("<TEI/>", encoding="utf-8")
+    ents = tmp_path / "entities" / "LIV0001_reconciled"
+    ents.mkdir(parents=True)
+    (ents / "persons.csv").write_text("id;name\n", encoding="utf-8")
+
+    def refuse(*a, **k):
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr("shutil.copystat", refuse)
+    monkeypatch.setattr("shutil.copymode", refuse)
+
+    ok, why = publish(tei, ents, root, "LIV0001", review=False, republish=False)
+    assert ok, why
+    assert (tei_dir(root) / "LIV0001.tei.xml").exists()
+    assert (tei_dir(root) / "entities" / "LIV0001" / "persons.csv").exists()

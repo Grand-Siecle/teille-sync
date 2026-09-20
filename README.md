@@ -40,26 +40,64 @@ Once per machine, in this order.
 
 Both go into the same virtual environment: `teille-sync` calls
 `teille-douce` by name, so the converter has to be on the `PATH` of the
-shell that runs `teille-sync`. The paths below assume `TEIlle-douce/`
-sits next to `teille-sync/`.
+shell that runs `teille-sync`.
 
 ```bash
 cd teille-sync
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -e '../TEIlle-douce[ner]'   # the converter, WITH named-entity recognition
-pip install -e .                         # teille-sync itself
+./scripts/install.sh
 ```
 
-- **`[ner]` is not optional.** A plain `pip install -e .` in TEIlle-douce
-  installs the core only — no torch, transformers, gliner or flair — and
-  the Services check then refuses every run. See
-  [Annotation phases are mandatory](#annotation-phases-are-mandatory).
-- **No GPU (the usual case under WSL)?** Install the CPU build of torch
-  *before* the `[ner]` line, or pip pulls the much larger CUDA build:
-  `pip install torch --index-url https://download.pytorch.org/whl/cpu`
+That is the whole of it. The script creates `.venv/` (or reuses a
+virtual environment already here), installs the converter and
+teille-sync into it, and verifies that both answer before it reports
+success. It is safe to run again on a machine that is already set up.
+
+**Developing the converter as well?** Then you want it editable, so that
+your edits to it count:
+
+```bash
+git clone https://github.com/Grand-Siecle/TEIlle-douce.git ../TEIlle-douce
+./scripts/install.sh --editable        # default path: ../TEIlle-douce
+```
+
+Add `--dev` to either form for pytest and coverage.
+
 - **The first NER run downloads several GB of models** from Hugging Face.
-  Expect the first batch to be slow.
+  Expect the first batch to be slow. The install itself also pulls torch,
+  which is large.
+- **Which converter you get.** Without `--editable`, the converter comes
+  from the tag pinned in the `converter` extra of `pyproject.toml` — so
+  that the `Version pipeline` each batch writes to the board names
+  something that cannot move underneath it. Moving to a newer converter
+  is a deliberate edit of that line, and pip caches git URLs, so an
+  existing machine needs `--force-reinstall` to pick the new one up.
+
+<details>
+<summary>Doing it by hand</summary>
+
+The script exists because each of these steps has a way of failing that
+names something other than its cause. If you do it yourself:
+
+```bash
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[converter]'      # teille-sync AND the converter
+```
+
+- **`python -m pip`, not `pip`.** If `~/.local/bin` precedes the virtual
+  environment on your `PATH` — the default on many machines — then `pip`
+  is some other Python's pip, and both projects land outside the
+  environment you just made. `python -m pip` cannot be shadowed.
+- **`[ner]` is not optional.** The `converter` extra asks for it already,
+  but installing TEIlle-douce by hand without it gives you the core only
+  — no torch, transformers, gliner or flair — and the Services check then
+  refuses every run. See
+  [Annotation phases are mandatory](#annotation-phases-are-mandatory).
+- **No GPU?** Install the CPU build of torch *before* anything that asks
+  for `[ner]`, or pip pulls the much larger CUDA build:
+  `python -m pip install torch --index-url https://download.pytorch.org/whl/cpu`
+
+</details>
 
 ### 2. Start PyHellen and VieuxParler
 
@@ -93,12 +131,14 @@ afternoon:** the drive does *not* appear at `/mnt/y` on its own. Mount it,
 and again after every WSL restart:
 
 ```bash
-sudo mkdir -p /mnt/y
-sudo mount -t drvfs Y: /mnt/y
+sudo mkdir -p /mnt/y && sudo mount -t drvfs Y: /mnt/y
 ```
 
 `teille-sync check` recognizes this situation (an `/mnt/<letter>` root
 that does not exist, on WSL) and prints that exact command as the fix.
+Both halves matter: WSL does not create `/mnt/<letter>` for a drive
+mapped after boot, and mounting onto a directory that is not there fails
+with `mount point does not exist`.
 
 ### 4. Write `config.local.toml`
 
@@ -136,6 +176,24 @@ A classic personal access token needs the `project` scope; a fine-grained
 token needs read/write access to Projects on the organisation. Set it in
 every shell that runs `teille-sync`. It is never printed or logged.
 
+Already signed in with the `gh` CLI? Its token usually carries `project`
+already, so you can hand it over instead of minting a new one — neither
+form below puts the token in your scrollback:
+
+```bash
+export GITHUB_TOKEN=$(gh auth token)                                    # gh >= 2.16
+export GITHUB_TOKEN=$(awk '/oauth_token:/{print $2}' ~/.config/gh/hosts.yml)   # older gh
+```
+
+Check which scopes it has with `gh api -i user | grep -i x-oauth-scopes`.
+
+Mind the difference between the two: a command substitution that fails
+still exports, with the failed command's own error text as the value. The
+first form does exactly that on `gh` older than 2.16, where `gh auth
+token` does not exist. You do not have to check for it — step 6 below
+refuses a value that cannot be a token and says why — but you do have to
+pick the form that matches your `gh`.
+
 ### 6. Create the board id file
 
 ```bash
@@ -168,7 +226,7 @@ Before each session:
 cd teille-sync
 source .venv/bin/activate
 export GITHUB_TOKEN=<token>
-# VPN up · share mounted (WSL: sudo mount -t drvfs Y: /mnt/y) · PyHellen and VieuxParler running
+# VPN up · share mounted (WSL: sudo mkdir -p /mnt/y && sudo mount -t drvfs Y: /mnt/y) · PyHellen and VieuxParler running
 teille-sync check
 ```
 

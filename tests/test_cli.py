@@ -585,6 +585,40 @@ def test_open_board_refuses_without_a_token(monkeypatch, tmp_path):
         cli._open_board(settings)
 
 
+# -- _require_token -----------------------------------------------------
+#
+# A command substitution that fails still exports — with the failed
+# command's own error text as the value. `export GITHUB_TOKEN=$(gh auth
+# token)` on a gh too old to have that subcommand exports gh's usage
+# message, and the board then answered `Illegal header value` from deep
+# in the HTTP layer: a refusal that names neither the token nor the
+# substitution that produced it. No real token contains whitespace, so
+# that is the tell, and here is where it is cheapest to say so.
+
+def test_a_token_that_is_really_an_error_message_is_refused(monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN",
+                       'unknown command "token" for "gh auth"\n\nUsage:  gh auth')
+    with pytest.raises(cli.BoardTransportError) as caught:
+        cli._require_token()
+    assert "whitespace" in str(caught.value)
+
+
+def test_a_token_shaped_like_a_real_one_is_accepted(monkeypatch):
+    """The guard above must not reject what it is meant to let through."""
+    monkeypatch.setenv("GITHUB_TOKEN", "gho_" + "x" * 36)
+    assert cli._require_token() == "gho_" + "x" * 36
+
+
+def test_the_refusal_does_not_quote_the_value_it_refused(monkeypatch):
+    """Whatever is in GITHUB_TOKEN is treated as a secret even when it is
+    plainly not one: the variable is never printed or logged, and a
+    refusal that echoed it back would be the one place that broke that."""
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_realsecret\nwith a newline")
+    with pytest.raises(cli.BoardTransportError) as caught:
+        cli._require_token()
+    assert "ghp_realsecret" not in str(caught.value)
+
+
 def test_open_board_refuses_on_an_unreadable_ids_file(monkeypatch, tmp_path):
     monkeypatch.setenv("GITHUB_TOKEN", "tok")
     settings = _settings(tmp_path, ids_file=tmp_path / "missing.json")
