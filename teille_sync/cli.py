@@ -100,6 +100,22 @@ def _require_token():
     if not token:
         raise BoardTransportError(
             "GITHUB_TOKEN is not set — the board needs it to authenticate")
+    # A command substitution that fails still exports, with the failed
+    # command's own error text as the value: `export
+    # GITHUB_TOKEN=$(gh auth token)` on a gh without that subcommand
+    # exports gh's usage message. Left alone, that travels as far as the
+    # Authorization header and comes back as httpx's `Illegal header
+    # value` — true, and about nothing the operator can act on. No token
+    # GitHub issues contains whitespace.
+    #
+    # The value is never quoted back: it is a secret whenever it is a
+    # real token, and this refusal cannot know which case it has.
+    if any(character.isspace() for character in token):
+        raise BoardTransportError(
+            "GITHUB_TOKEN does not look like a token: it contains "
+            "whitespace. A command substitution that fails still exports "
+            "— with the failed command's own error text as the value. "
+            "Check the command you set it with.")
     return token
 
 
