@@ -117,7 +117,13 @@ def _check_nas_root(settings):
         letter = _windows_drive_letter(root)
         if letter is not None and on_wsl():
             drive = f"{letter.upper()}:"
+            # Two commands, not one. WSL creates /mnt/<letter> only for
+            # the drives it mounts at boot, so for a share mapped later
+            # the directory is absent and a bare `mount` answers `mount
+            # point does not exist` — the operator pastes the remedy,
+            # gets a second error, and is no further forward.
             return Check("NAS root", False, f"{root} does not exist",
+                         f"sudo mkdir -p {root} && "
                          f"sudo mount -t drvfs {drive} {root}")
         detail = f"{root} does not exist" if not root.exists() else f"{root} is not a directory"
         return Check("NAS root", False, detail,
