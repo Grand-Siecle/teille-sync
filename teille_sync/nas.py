@@ -108,7 +108,19 @@ def publish(tei_path, entities_dir, root, identifier, review, republish):
         # Copy entities first; TEI is the marker of completion.
         if entities_dir and Path(entities_dir).is_dir():
             where = tei_dir(root) / ENTITIES / identifier
-            shutil.copytree(entities_dir, where, dirs_exist_ok=True)
+            where.mkdir(parents=True, exist_ok=True)
+            # copyfile, not copytree: copytree copies metadata as well as
+            # bytes, and a share mounted over drvfs (Windows network drive
+            # under WSL) refuses chmod and utime with EPERM even once every
+            # byte has landed. copytree collects those refusals into a
+            # shutil.Error — an OSError — so a publish that had in fact
+            # copied the entities aborted below, before the TEI, and left
+            # the document half on the share with its card reading Terminé.
+            # The directories here are flat, so a loop over the files is
+            # the whole of what copytree was doing that we want.
+            for entity_csv in sorted(Path(entities_dir).iterdir()):
+                if entity_csv.is_file():
+                    shutil.copyfile(entity_csv, where / entity_csv.name)
         # TEI last: if this succeeds, the document is fully published.
         shutil.copyfile(tei_path, target)
         if target.stat().st_size != Path(tei_path).stat().st_size:
