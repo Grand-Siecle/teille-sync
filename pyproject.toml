@@ -20,7 +20,7 @@ dev = ["pytest>=8.0", "coverage>=7.4"]
 # pip caches git URLs, so picking up a retagged or newer converter needs
 # `--force-reinstall`; changing the tag here is enough on a fresh install.
 converter = [
-    "teille-douce[ner] @ git+https://github.com/Grand-Siecle/TEIlle-douce.git@v2.0.0",
+    "teille-douce[ner] @ git+https://github.com/Grand-Siecle/TEIlle-douce.git@v2.0.1",
 ]
 
 [project.scripts]
